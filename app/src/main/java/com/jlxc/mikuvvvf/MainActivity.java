@@ -85,7 +85,7 @@ public class MainActivity extends Activity {
         root.addView(title, matchWrap());
 
         TextView sub = new TextView(this);
-        sub.setText("车速绑定 VVVF 声浪模拟 · UDP 47230 · AudioTrack 实时合成");
+        sub.setText("车速绑定 VVVF 声浪模拟 V2 · 分段调制 · UDP 47230");
         sub.setTextSize(14);
         sub.setGravity(Gravity.CENTER_HORIZONTAL);
         sub.setPadding(0, dp(6), 0, dp(12));
@@ -176,6 +176,14 @@ public class MainActivity extends Activity {
         styleGroup.addView(igbtButton, weightWrap(1));
         gtoButton.setChecked(true);
         root.addView(styleGroup, matchWrap());
+
+        TextView stageHint = new TextView(this);
+        stageHint.setText("GTO 换段：8 / 24 / 42 / 68 km/h；IGBT 换段：16 / 36 / 78 km/h");
+        stageHint.setTextSize(13);
+        stageHint.setTextColor(Color.DKGRAY);
+        stageHint.setPadding(0, dp(2), 0, dp(6));
+        root.addView(stageHint, matchWrap());
+
         styleGroup.setOnCheckedChangeListener((group, checkedId) -> {
             if (checkedId == 1002) sendStyle("IGBT");
             else sendStyle("GTO");

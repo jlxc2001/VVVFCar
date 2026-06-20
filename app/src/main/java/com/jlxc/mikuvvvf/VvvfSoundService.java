@@ -221,9 +221,9 @@ public class VvvfSoundService extends Service {
     private void updateNotification() {
         NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
         if (nm != null) {
-            String text = String.format(Locale.US, "%s · %.1f km/h · vol %.0f%% · UDP %d%s",
-                    engine.getStyle().name(), engine.getTargetSpeedKmh(), engine.getVolume() * 100f,
-                    UDP_PORT, engine.isMuted() ? " · muted" : "");
+            String text = String.format(Locale.US, "%s · %.1f km/h · %s · vol %.0f%% · UDP %d%s",
+                    engine.getStyle().name(), engine.getTargetSpeedKmh(), engine.getStageName(),
+                    engine.getVolume() * 100f, UDP_PORT, engine.isMuted() ? " · muted" : "");
             nm.notify(NOTIFICATION_ID, buildNotification(text));
         }
     }
