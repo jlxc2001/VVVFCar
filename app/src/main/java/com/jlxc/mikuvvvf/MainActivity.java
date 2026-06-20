@@ -28,6 +28,7 @@ import java.util.Collections;
 import java.util.Locale;
 
 public class MainActivity extends Activity {
+    private static final int ID_SAMPLE = 1000;
     private static final int ID_GTO = 1001;
     private static final int ID_IGBT = 1002;
     private static final int ID_SIEMENS = 1003;
@@ -42,6 +43,7 @@ public class MainActivity extends Activity {
     private SeekBar speedSeek;
     private SeekBar volumeSeek;
     private Switch muteSwitch;
+    private RadioButton sampleButton;
     private RadioButton gtoButton;
     private RadioButton igbtButton;
     private RadioButton siemensButton;
@@ -59,12 +61,12 @@ public class MainActivity extends Activity {
     private final Runnable autoRunnable = new Runnable() {
         @Override public void run() {
             if (!autoTest) return;
-            autoSpeed += autoDirection * 0.25f; // V4：比旧版慢很多，方便听清换段/升挡。
-            if (autoSpeed >= 120f) { autoSpeed = 120f; autoDirection = -1; }
+            autoSpeed += autoDirection * 0.10f; // V6：按 0→140km/h 样本节奏慢慢爬升，方便听真实换段。
+            if (autoSpeed >= 140f) { autoSpeed = 140f; autoDirection = -1; }
             if (autoSpeed <= 0f) { autoSpeed = 0f; autoDirection = 1; }
             speedSeek.setProgress(Math.round(autoSpeed * 10f));
             sendSpeed(autoSpeed);
-            handler.postDelayed(this, 80);
+            handler.postDelayed(this, 90);
         }
     };
 
@@ -92,14 +94,14 @@ public class MainActivity extends Activity {
         scroll.addView(root);
 
         TextView title = new TextView(this);
-        title.setText("Miku VVVF / Engine Sound Demo");
+        title.setText("Miku VVVF / Engine Sound Demo V6");
         title.setTextSize(25);
         title.setTextColor(Color.rgb(0, 120, 130));
         title.setGravity(Gravity.CENTER_HORIZONTAL);
         root.addView(title, matchWrap());
 
         TextView sub = new TextView(this);
-        sub.setText("车速绑定声浪模拟 V4 · VVVF + 飞机 + 发动机 · UDP 47230");
+        sub.setText("车速绑定声浪模拟 V6 · 真实 VVVF 采样版 + Engine-Sim 思路 · UDP 47230");
         sub.setTextSize(14);
         sub.setGravity(Gravity.CENTER_HORIZONTAL);
         sub.setPadding(0, dp(6), 0, dp(12));
@@ -159,19 +161,19 @@ public class MainActivity extends Activity {
         });
 
         Button auto = new Button(this);
-        auto.setText("慢速自动 0→120→0 测试");
+        auto.setText("真实采样自动 0→140→0 测试");
         root.addView(auto, matchWrap());
         auto.setOnClickListener(v -> {
             autoTest = !autoTest;
             if (autoTest) {
                 autoSpeed = speedSeek.getProgress() / 10f;
-                autoDirection = autoSpeed >= 120f ? -1 : 1;
+                autoDirection = autoSpeed >= 140f ? -1 : 1;
                 handler.removeCallbacks(autoRunnable);
                 handler.post(autoRunnable);
                 auto.setText("停止自动测试");
             } else {
                 handler.removeCallbacks(autoRunnable);
-                auto.setText("慢速自动 0→120→0 测试");
+                auto.setText("真实采样自动 0→140→0 测试");
             }
         });
 
@@ -181,6 +183,7 @@ public class MainActivity extends Activity {
         RadioGroup styleGroup = new RadioGroup(this);
         styleGroup.setOrientation(RadioGroup.VERTICAL);
 
+        sampleButton = addStyleRadio(styleGroup, ID_SAMPLE, "真实采样 VVVF 0→140km/h / 你提供的录音");
         siemensButton = addStyleRadio(styleGroup, ID_SIEMENS, "广东地铁西门子 GTO / 广州 1 号线 A1 味");
         gtoButton = addStyleRadio(styleGroup, ID_GTO, "通用 GTO 粗糙老电车");
         igbtButton = addStyleRadio(styleGroup, ID_IGBT, "通用 IGBT 顺滑现代电车");
@@ -190,11 +193,11 @@ public class MainActivity extends Activity {
         rotaryButton = addStyleRadio(styleGroup, ID_ROTARY, "转子发动机 / 高转蜂鸣");
         superchargedV8Button = addStyleRadio(styleGroup, ID_SUPERCHARGED_V8, "地狱猫风格 / 机械增压 V8");
 
-        siemensButton.setChecked(true);
+        sampleButton.setChecked(true);
         root.addView(styleGroup, matchWrap());
 
         TextView stageHint = new TextView(this);
-        stageHint.setText("V4：自动测试已放慢；发动机类使用车速模拟虚拟挡位/RPM，所以只发 SPEED 也能听到升挡掉转。真实接车后，后续可再加入 RPM/油门/刹车数据。");
+        stageHint.setText("V6：VVVF 默认改为真实采样映射。你提供的 WAV 是 0→140km/h，App 会把车速映射到录音位置，并用短粒度循环保持匀速。发动机类继续保留 V5 的曲轴/点火/排气脉冲模型，下一步会按 engine-sim 的节点/脚本思路继续重写。");
         stageHint.setTextSize(13);
         stageHint.setTextColor(Color.DKGRAY);
         stageHint.setPadding(0, dp(2), 0, dp(6));
@@ -245,6 +248,7 @@ public class MainActivity extends Activity {
     }
 
     private String styleFromId(int checkedId) {
+        if (checkedId == ID_SAMPLE) return "SAMPLE_VVVF_0_140";
         if (checkedId == ID_SIEMENS) return "SIEMENS_GZ_GTO";
         if (checkedId == ID_IGBT) return "IGBT";
         if (checkedId == ID_AIRCRAFT) return "AIRCRAFT_TURBINE";
@@ -270,7 +274,8 @@ public class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(i);
         else startService(i);
         sendVolume(volumeSeek == null ? 0.55f : volumeSeek.getProgress() / 100f);
-        if (siemensButton == null || siemensButton.isChecked()) sendStyle("SIEMENS_GZ_GTO");
+        if (sampleButton == null || sampleButton.isChecked()) sendStyle("SAMPLE_VVVF_0_140");
+        else if (siemensButton != null && siemensButton.isChecked()) sendStyle("SIEMENS_GZ_GTO");
         else if (gtoButton != null && gtoButton.isChecked()) sendStyle("GTO");
         else if (igbtButton != null && igbtButton.isChecked()) sendStyle("IGBT");
         else if (aircraftButton != null && aircraftButton.isChecked()) sendStyle("AIRCRAFT_TURBINE");
@@ -318,6 +323,7 @@ public class MainActivity extends Activity {
         String host = TextUtils.isEmpty(ip) ? "车机IP" : ip;
         String text = "局域网 UDP 指令：\n"
                 + "  echo SPEED 45 | nc -u " + host + " 47230\n"
+                + "  echo STYLE SAMPLE_VVVF_0_140 | nc -u " + host + " 47230\n"
                 + "  echo STYLE SIEMENS_GZ_GTO | nc -u " + host + " 47230\n"
                 + "  echo STYLE AIRCRAFT_TURBINE | nc -u " + host + " 47230\n"
                 + "  echo STYLE POP_BANG_TURBO | nc -u " + host + " 47230\n"
@@ -326,11 +332,11 @@ public class MainActivity extends Activity {
                 + "  echo STYLE SUPERCHARGED_V8 | nc -u " + host + " 47230\n\n"
                 + "ADB 调试：\n"
                 + "  adb shell am broadcast -a com.jlxc.mikuvvvf.SET_SPEED --ef speed 45\n"
-                + "  adb shell am broadcast -a com.jlxc.mikuvvvf.SET_STYLE --es style SIEMENS_GZ_GTO\n"
+                + "  adb shell am broadcast -a com.jlxc.mikuvvvf.SET_STYLE --es style SAMPLE_VVVF_0_140\n"
                 + "  adb shell am broadcast -a com.jlxc.mikuvvvf.SET_STYLE --es style POP_BANG_TURBO\n"
                 + "  adb shell am broadcast -a com.jlxc.mikuvvvf.SET_STYLE --es style SUPERCHARGED_V8\n"
                 + "  adb shell am broadcast -a com.jlxc.mikuvvvf.STOP\n\n"
-                + "后续接入 MikuCarLauncher 时，只要持续发送 SPEED 当前车速 即可。";
+                + "后续接入 MikuCarLauncher 时，可只发 SPEED 当前车速；如果能发 STATE 车速 转速 油门开度，发动机模式会更真实。";
         infoText.setText(text);
     }
 

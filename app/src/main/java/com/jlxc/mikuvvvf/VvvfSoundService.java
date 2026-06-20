@@ -35,7 +35,7 @@ public class VvvfSoundService extends Service {
     private static final String CHANNEL_ID = "miku_vvvf_sound";
     private static final int NOTIFICATION_ID = 3939;
 
-    private final VvvfSynthEngine engine = new VvvfSynthEngine();
+    private VvvfSynthEngine engine;
     private final AtomicBoolean udpRunning = new AtomicBoolean(false);
     private Thread udpThread;
     private DatagramSocket udpSocket;
@@ -44,8 +44,9 @@ public class VvvfSoundService extends Service {
     public void onCreate() {
         super.onCreate();
         createChannel();
+        engine = new VvvfSynthEngine(getApplicationContext());
         engine.setStatusListener(text -> {});
-        startForeground(NOTIFICATION_ID, buildNotification("Ready · UDP " + UDP_PORT));
+        startForeground(NOTIFICATION_ID, buildNotification("Ready · UDP " + UDP_PORT + " · " + engine.getSampleVvvfStatus()));
         startUdpServer();
         engine.start();
     }
@@ -147,8 +148,14 @@ public class VvvfSoundService extends Service {
                     if (parts.length >= 2) engine.setSpeedKmh(Float.parseFloat(parts[1]));
                     break;
                 case "STATE":
-                    // STATE speed rpm throttle/brakeFlag. First version only uses speed.
-                    if (parts.length >= 2) engine.setSpeedKmh(Float.parseFloat(parts[1]));
+                    // STATE speed rpm throttle. rpm/throttle are optional.
+                    if (parts.length >= 4) {
+                        engine.setVehicleState(Float.parseFloat(parts[1]), Float.parseFloat(parts[2]), Float.parseFloat(parts[3]));
+                    } else if (parts.length >= 3) {
+                        engine.setVehicleState(Float.parseFloat(parts[1]), Float.parseFloat(parts[2]), -1f);
+                    } else if (parts.length >= 2) {
+                        engine.setSpeedKmh(Float.parseFloat(parts[1]));
+                    }
                     break;
                 case "STYLE":
                     if (parts.length >= 2) applyStyle(parts[1]);
@@ -185,7 +192,9 @@ public class VvvfSoundService extends Service {
     private void applyStyle(String styleName) {
         if (styleName == null) return;
         String s = styleName.trim().toUpperCase(Locale.US);
-        if (s.contains("AIR") || s.contains("PLANE") || s.contains("JET") || s.contains("TURBINE") || s.contains("飞机") || s.contains("涡扇")) {
+        if (s.contains("SAMPLE") || s.contains("REAL") || s.contains("VVVF_SAMPLE") || s.contains("真实") || s.contains("采样") || s.contains("录音")) {
+            engine.setStyle(VvvfSynthEngine.Style.SAMPLE_VVVF_0_140);
+        } else if (s.contains("AIR") || s.contains("PLANE") || s.contains("JET") || s.contains("TURBINE") || s.contains("飞机") || s.contains("涡扇")) {
             engine.setStyle(VvvfSynthEngine.Style.AIRCRAFT_TURBINE);
         } else if (s.contains("POP") || s.contains("BANG") || s.contains("ANTI") || s.contains("TURBO") || s.contains("偏时") || s.contains("回火") || s.contains("放炮")) {
             engine.setStyle(VvvfSynthEngine.Style.POP_BANG_TURBO);
@@ -226,7 +235,7 @@ public class VvvfSoundService extends Service {
                 : new Notification.Builder(this);
         return builder
                 .setSmallIcon(R.drawable.ic_stat_vvvf)
-                .setContentTitle("Miku VVVF / Engine Sound")
+                .setContentTitle("Miku VVVF Sample / Engine Sound")
                 .setContentText(text)
                 .setContentIntent(pi)
                 .setOngoing(true)
