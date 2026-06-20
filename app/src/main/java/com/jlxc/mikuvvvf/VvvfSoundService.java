@@ -8,7 +8,9 @@ import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.os.Build;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
@@ -24,11 +26,23 @@ public class VvvfSoundService extends Service {
     public static final String ACTION_SET_STYLE = "com.jlxc.mikuvvvf.action.SET_STYLE";
     public static final String ACTION_SET_VOLUME = "com.jlxc.mikuvvvf.action.SET_VOLUME";
     public static final String ACTION_SET_MUTE = "com.jlxc.mikuvvvf.action.SET_MUTE";
+    public static final String ACTION_SET_HOOK = "com.jlxc.mikuvvvf.action.SET_HOOK";
+    public static final String ACTION_STATUS = "com.jlxc.mikuvvvf.action.STATUS";
 
     public static final String EXTRA_SPEED = "speed";
     public static final String EXTRA_STYLE = "style";
     public static final String EXTRA_VOLUME = "volume";
     public static final String EXTRA_MUTE = "mute";
+    public static final String EXTRA_HOOK_ENABLED = "hook_enabled";
+    public static final String EXTRA_STATUS_SPEED = "status_speed";
+    public static final String EXTRA_STATUS_TARGET_SPEED = "status_target_speed";
+    public static final String EXTRA_STATUS_RPM = "status_rpm";
+    public static final String EXTRA_STATUS_THROTTLE = "status_throttle";
+    public static final String EXTRA_STATUS_ACCEL = "status_accel";
+    public static final String EXTRA_STATUS_STYLE = "status_style";
+    public static final String EXTRA_STATUS_STAGE = "status_stage";
+    public static final String EXTRA_STATUS_SOURCE = "status_source";
+    public static final String EXTRA_STATUS_HOOK = "status_hook";
 
     public static final int UDP_PORT = 47230;
 
@@ -39,6 +53,15 @@ public class VvvfSoundService extends Service {
     private final AtomicBoolean udpRunning = new AtomicBoolean(false);
     private Thread udpThread;
     private DatagramSocket udpSocket;
+    private VehicleDataProvider vehicleDataProvider;
+    private volatile String hookStatus = "Hook idle";
+    private final Handler statusHandler = new Handler(Looper.getMainLooper());
+    private final Runnable statusRunnable = new Runnable() {
+        @Override public void run() {
+            broadcastStatus();
+            statusHandler.postDelayed(this, 250);
+        }
+    };
 
     @Override
     public void onCreate() {
@@ -46,9 +69,24 @@ public class VvvfSoundService extends Service {
         createChannel();
         engine = new VvvfSynthEngine(getApplicationContext());
         engine.setStatusListener(text -> {});
-        startForeground(NOTIFICATION_ID, buildNotification("Ready · UDP " + UDP_PORT + " · " + engine.getSampleVvvfStatus()));
+        vehicleDataProvider = new VehicleDataProvider(getApplicationContext(), new VehicleDataProvider.Listener() {
+            @Override public void onVehicleData(VehicleDataProvider.VehicleSnapshot snapshot) {
+                if (snapshot == null || !snapshot.valid) return;
+                engine.setVehicleStateFromHook(snapshot.speedKmh, snapshot.rpm, snapshot.throttle, snapshot.source);
+                hookStatus = snapshot.rawSummary;
+            }
+            @Override public void onVehicleProviderStatus(String text) {
+                hookStatus = text == null ? "" : text;
+            }
+        });
+        vehicleDataProvider.setPollIntervalMs(500);
+        vehicleDataProvider.setEnabled(true);
+        vehicleDataProvider.start();
+        startForeground(NOTIFICATION_ID, buildNotification("Ready · Hook ON 500ms · UDP " + UDP_PORT + " · " + engine.getSampleVvvfStatus()));
         startUdpServer();
         engine.start();
+        statusHandler.removeCallbacks(statusRunnable);
+        statusHandler.post(statusRunnable);
     }
 
     @Override
@@ -71,12 +109,18 @@ public class VvvfSoundService extends Service {
             } else if (ACTION_SET_MUTE.equals(action)) {
                 engine.setMuted(intent.getBooleanExtra(EXTRA_MUTE, engine.isMuted()));
                 updateNotification();
+            } else if (ACTION_SET_HOOK.equals(action)) {
+                if (vehicleDataProvider != null) {
+                    vehicleDataProvider.setEnabled(intent.getBooleanExtra(EXTRA_HOOK_ENABLED, vehicleDataProvider.isEnabled()));
+                }
+                updateNotification();
             } else {
                 updateNotification();
             }
         }
         if (!engine.isRunning()) engine.start();
         if (!udpRunning.get()) startUdpServer();
+        if (vehicleDataProvider != null) vehicleDataProvider.start();
         return START_STICKY;
     }
 
@@ -87,13 +131,23 @@ public class VvvfSoundService extends Service {
 
     @Override
     public void onDestroy() {
+        statusHandler.removeCallbacks(statusRunnable);
         stopUdpServer();
+        if (vehicleDataProvider != null) {
+            vehicleDataProvider.stop();
+            vehicleDataProvider = null;
+        }
         engine.stop();
         super.onDestroy();
     }
 
     private void stopSelfSafely() {
+        statusHandler.removeCallbacks(statusRunnable);
         stopUdpServer();
+        if (vehicleDataProvider != null) {
+            vehicleDataProvider.stop();
+            vehicleDataProvider = null;
+        }
         engine.stop();
         stopForeground(true);
         stopSelf();
@@ -169,8 +223,17 @@ public class VvvfSoundService extends Service {
                 case "UNMUTE":
                     engine.setMuted(false);
                     break;
+                case "HOOK":
+                    if (vehicleDataProvider != null) {
+                        boolean on = parts.length < 2 || !("0".equals(parts[1]) || "OFF".equalsIgnoreCase(parts[1]) || "FALSE".equalsIgnoreCase(parts[1]));
+                        vehicleDataProvider.setEnabled(on);
+                    }
+                    break;
+                case "POLL":
+                    if (parts.length >= 2 && vehicleDataProvider != null) vehicleDataProvider.setPollIntervalMs(Integer.parseInt(parts[1]));
+                    break;
                 case "PING":
-                    replyUdp("PONG MIKU_VVVF " + engine.getTargetSpeedKmh(), remote, remotePort);
+                    replyUdp("PONG MIKU_VVVF " + engine.getTargetSpeedKmh() + " " + hookStatus, remote, remotePort);
                     break;
                 case "STOP":
                     engine.setSpeedKmh(0f);
@@ -235,18 +298,34 @@ public class VvvfSoundService extends Service {
                 : new Notification.Builder(this);
         return builder
                 .setSmallIcon(R.drawable.ic_stat_vvvf)
-                .setContentTitle("Miku VVVF Sample / Engine Sound")
+                .setContentTitle("Miku VVVF Fighter HUD")
                 .setContentText(text)
                 .setContentIntent(pi)
                 .setOngoing(true)
                 .build();
     }
 
+    private void broadcastStatus() {
+        if (engine == null) return;
+        Intent i = new Intent(ACTION_STATUS);
+        i.setPackage(getPackageName());
+        i.putExtra(EXTRA_STATUS_SPEED, engine.getDisplaySpeedKmh());
+        i.putExtra(EXTRA_STATUS_TARGET_SPEED, engine.getTargetSpeedKmh());
+        i.putExtra(EXTRA_STATUS_RPM, engine.getDisplayRpm());
+        i.putExtra(EXTRA_STATUS_THROTTLE, engine.getDisplayThrottle());
+        i.putExtra(EXTRA_STATUS_ACCEL, engine.getDisplayAccel());
+        i.putExtra(EXTRA_STATUS_STYLE, engine.getStyle().name());
+        i.putExtra(EXTRA_STATUS_STAGE, engine.getStageName());
+        i.putExtra(EXTRA_STATUS_SOURCE, engine.getInputSourceName());
+        i.putExtra(EXTRA_STATUS_HOOK, hookStatus);
+        sendBroadcast(i);
+    }
+
     private void updateNotification() {
         NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
         if (nm != null) {
-            String text = String.format(Locale.US, "%s · %.1f km/h · %s · vol %.0f%% · UDP %d%s",
-                    engine.getStyle().name(), engine.getTargetSpeedKmh(), engine.getStageName(),
+            String text = String.format(Locale.US, "%s · %.1f km/h · %s · %s · vol %.0f%% · UDP %d%s",
+                    engine.getStyle().name(), engine.getTargetSpeedKmh(), engine.getStageName(), engine.getInputSourceName(),
                     engine.getVolume() * 100f, UDP_PORT, engine.isMuted() ? " · muted" : "");
             nm.notify(NOTIFICATION_ID, buildNotification(text));
         }

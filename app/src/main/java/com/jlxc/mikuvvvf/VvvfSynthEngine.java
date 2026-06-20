@@ -35,7 +35,9 @@ public class VvvfSynthEngine {
     private static final double TWO_PI = Math.PI * 2.0;
     private static final double SAMPLE_VVVF_MAX_SPEED_KMH = 140.0;
     private static final double SAMPLE_VVVF_START_TRIM_SEC = 0.55;
-    private static final double SAMPLE_VVVF_LOOP_SEC = 0.260;
+    private static final double SAMPLE_VVVF_LOOP_SEC = 0.880;
+    private static final double SAMPLE_VVVF_ACCEL_LOOP_SEC = 1.420;
+    private static final double SAMPLE_VVVF_DECEL_LOOP_SEC = 1.180;
 
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final Random random = new Random(20260620L);
@@ -46,6 +48,7 @@ public class VvvfSynthEngine {
     private int sampleVvvfRate = SAMPLE_RATE;
     private String sampleVvvfStatus = "sample not loaded";
     private double sampleLoopPhase = 0.0;
+    private double sampleLoopCenterFrame = -1.0;
 
     private Thread audioThread;
     private AudioTrack audioTrack;
@@ -61,10 +64,21 @@ public class VvvfSynthEngine {
     private volatile float externalThrottle = -1f;
     private volatile long externalStateNs = 0L;
 
+    // Data source / anti-stutter smoothing. Hook updates are intentionally low-rate
+    // (>= 500ms), so the audio engine must glide between samples rather than snap.
+    private volatile boolean hookInputFresh = false;
+    private volatile long hookInputNs = 0L;
+    private volatile String inputSourceName = "MANUAL/UDP";
+    private volatile double speedTauSeconds = 0.16;
+
     private double smoothedSpeed = 0.0;
     private double smoothedAccel = 0.0;
     private double smoothedRpm = 900.0;
     private double smoothedThrottle = 0.0;
+    private volatile float displaySpeedKmh = 0f;
+    private volatile float displayRpm = 900f;
+    private volatile float displayThrottle = 0f;
+    private volatile float displayAccel = 0f;
 
     // Rail / turbine oscillator phases.
     private double motorPhase = 0.0;
@@ -124,36 +138,74 @@ public class VvvfSynthEngine {
     }
 
     public void setSpeedKmh(float speedKmh) {
+        setSpeedInternal(speedKmh, -1f, -1f, false, "MANUAL/UDP", 0.16);
+    }
+
+    public void setVehicleState(float speedKmh, float rpm, float throttle) {
+        setSpeedInternal(speedKmh, rpm, throttle, false, "STATE/UDP", 0.18);
+    }
+
+    public void setVehicleStateFromHook(float speedKmh, float rpm, float throttle, String source) {
+        setSpeedInternal(speedKmh, rpm, throttle, true, source == null ? "HOOK" : source, 0.72);
+    }
+
+    private void setSpeedInternal(float speedKmh, float rpm, float throttle, boolean fromHook, String source, double tauSeconds) {
         if (Float.isNaN(speedKmh) || Float.isInfinite(speedKmh)) return;
         speedKmh = Math.max(0f, Math.min(260f, speedKmh));
 
         long now = System.nanoTime();
         if (lastSpeedSetNs != 0L) {
-            double dt = Math.max(0.02, (now - lastSpeedSetNs) / 1_000_000_000.0);
+            double dt = Math.max(0.10, (now - lastSpeedSetNs) / 1_000_000_000.0);
             double rawAccel = (speedKmh - lastSpeedInput) / dt;
-            smoothedAccel = smoothedAccel * 0.70 + rawAccel * 0.30;
+            // Hook data arrives at 500ms+ intervals; use heavier accel smoothing so sample playback
+            // and engine load do not pulse when the raw speed changes by 1 km/h per poll.
+            double accelAlpha = fromHook ? 0.10 : 0.28;
+            smoothedAccel = smoothedAccel * (1.0 - accelAlpha) + rawAccel * accelAlpha;
         }
         lastSpeedSetNs = now;
         lastSpeedInput = speedKmh;
         targetSpeedKmh = speedKmh;
-    }
+        inputSourceName = source == null ? (fromHook ? "HOOK" : "MANUAL/UDP") : source;
+        speedTauSeconds = Math.max(0.06, Math.min(1.50, tauSeconds));
+        hookInputFresh = fromHook;
+        if (fromHook) hookInputNs = now;
 
-    public void setVehicleState(float speedKmh, float rpm, float throttle) {
-        setSpeedKmh(speedKmh);
         if (!Float.isNaN(rpm) && !Float.isInfinite(rpm) && rpm > 300f) {
             externalRpm = Math.max(600f, Math.min(9800f, rpm));
-            externalStateNs = System.nanoTime();
+            externalStateNs = now;
         }
         if (!Float.isNaN(throttle) && !Float.isInfinite(throttle)) {
             // Accept either 0..1 or 0..100.
             float t = throttle > 1.5f ? throttle / 100f : throttle;
             externalThrottle = Math.max(0f, Math.min(1f, t));
-            externalStateNs = System.nanoTime();
+            externalStateNs = now;
         }
+    }
+
+    public String getInputSourceName() {
+        long ageMs = hookInputFresh && hookInputNs != 0L ? (System.nanoTime() - hookInputNs) / 1_000_000L : -1L;
+        if (ageMs >= 0) return inputSourceName + " " + ageMs + "ms";
+        return inputSourceName;
     }
 
     public float getTargetSpeedKmh() {
         return targetSpeedKmh;
+    }
+
+    public float getDisplaySpeedKmh() {
+        return displaySpeedKmh;
+    }
+
+    public float getDisplayRpm() {
+        return displayRpm;
+    }
+
+    public float getDisplayThrottle() {
+        return displayThrottle;
+    }
+
+    public float getDisplayAccel() {
+        return displayAccel;
     }
 
     public void setVolume(float value) {
@@ -180,6 +232,7 @@ public class VvvfSynthEngine {
             popEnvelope = 0.0;
             overrunEnvelope = 0.0;
             sampleLoopPhase = 0.0;
+            sampleLoopCenterFrame = -1.0;
         }
     }
 
@@ -246,14 +299,21 @@ public class VvvfSynthEngine {
     }
 
     private void fillBuffer(short[] out, int frames) {
-        final double speedAlpha = 1.0 - Math.exp(-1.0 / (SAMPLE_RATE * 0.080));
         final double rpmAlpha = 1.0 - Math.exp(-1.0 / (SAMPLE_RATE * 0.055));
         final double throttleAlpha = 1.0 - Math.exp(-1.0 / (SAMPLE_RATE * 0.090));
         Style currentStyle = style;
 
         for (int i = 0; i < frames; i++) {
+            long nowNs = System.nanoTime();
+            if (hookInputFresh && hookInputNs != 0L && nowNs - hookInputNs > 2_500_000_000L) {
+                hookInputFresh = false;
+                speedTauSeconds = 0.22;
+                inputSourceName = "HOOK stale / fallback";
+            }
+            double tau = Math.max(0.035, speedTauSeconds);
+            double speedAlpha = 1.0 - Math.exp(-1.0 / (SAMPLE_RATE * tau));
             smoothedSpeed += (targetSpeedKmh - smoothedSpeed) * speedAlpha;
-            smoothedAccel *= 0.999995;
+            smoothedAccel *= hookInputFresh ? 0.9999982 : 0.999995;
 
             double speed = smoothedSpeed;
             int stage = calcStage(speed, currentStyle);
@@ -314,6 +374,15 @@ public class VvvfSynthEngine {
                 smoothedThrottle += (wantedThrottle - smoothedThrottle) * throttleAlpha;
 
                 advanceEnginePhases(smoothedRpm, currentStyle);
+                if (currentStyle == Style.AIRCRAFT_TURBINE) {
+                    // V6 accidentally let the aircraft renderer use rail oscillator phases
+                    // without advancing them. Restore the V4/V5 turbine whine behavior by
+                    // advancing the fan / compressor / rumble phases independently.
+                    double fanHz = 28.0 + smoothedRpm * 0.018;
+                    double compressorHz = 520.0 + smoothedRpm * 0.54;
+                    double rumbleHz = 16.0 + smoothedRpm * 0.006;
+                    advanceRailPhases(fanHz, compressorHz, rumbleHz);
+                }
                 wave = renderEngineOrAircraft(currentStyle, stage, speed, smoothedRpm, smoothedThrottle, smoothedAccel);
 
                 double loadGain;
@@ -332,6 +401,10 @@ public class VvvfSynthEngine {
             double sample = softClip(wave * amp);
             out[i] = (short) Math.max(Short.MIN_VALUE, Math.min(Short.MAX_VALUE, sample * 32767.0));
         }
+        displaySpeedKmh = (float) smoothedSpeed;
+        displayRpm = (float) smoothedRpm;
+        displayThrottle = (float) smoothedThrottle;
+        displayAccel = (float) smoothedAccel;
     }
 
 
@@ -426,38 +499,71 @@ public class VvvfSynthEngine {
 
         double usable = Math.max(4.0, sampleVvvfEndFrame - sampleVvvfStartFrame - 2.0);
         double norm = clamp(speed / SAMPLE_VVVF_MAX_SPEED_KMH, 0.0, 1.0);
-        // Slight ease keeps the opening low-speed material from being skipped too quickly.
+        // Keep low-speed material a little longer. This avoids jumping past the first Siemens/GTO
+        // step when the vehicle begins moving from 0km/h.
         double eased = norm < 0.22 ? norm * 0.86 : 0.1892 + (norm - 0.22) * 1.04;
         eased = clamp(eased, 0.0, 1.0);
-        double center = sampleVvvfStartFrame + eased * usable;
+        double targetCenter = sampleVvvfStartFrame + eased * usable;
 
-        int loopFrames = (int) (SAMPLE_VVVF_LOOP_SEC * sampleVvvfRate);
-        if (Math.abs(accel) > 0.20) loopFrames = (int) (0.360 * sampleVvvfRate);
-        loopFrames = Math.max(4096, Math.min(loopFrames, Math.max(4096, src.length / 4)));
+        if (sampleLoopCenterFrame < 0.0) {
+            sampleLoopCenterFrame = targetCenter;
+        }
+
+        // V6 used the target center directly. When speed changed, the grain window jumped every
+        // buffer and produced a "du-du-du" artifact. V7 uses a magnetic moving center: speed only
+        // pulls the sample window toward the target; the audio window itself stays continuous.
+        double absAccel = Math.abs(accel);
+        double tauSec;
+        double maxCenterMovePerOutputSample;
+        if (accel > 0.25) {
+            tauSec = 0.36;
+            maxCenterMovePerOutputSample = 2.20;
+        } else if (accel < -0.25) {
+            tauSec = 0.58;
+            maxCenterMovePerOutputSample = 1.15;
+        } else {
+            tauSec = 0.95;
+            maxCenterMovePerOutputSample = 0.42;
+        }
+        double centerAlpha = 1.0 - Math.exp(-1.0 / (SAMPLE_RATE * tauSec));
+        double wantedMove = (targetCenter - sampleLoopCenterFrame) * centerAlpha;
+        sampleLoopCenterFrame += clamp(wantedMove, -maxCenterMovePerOutputSample, maxCenterMovePerOutputSample);
+        sampleLoopCenterFrame = clamp(sampleLoopCenterFrame, sampleVvvfStartFrame + 32.0, sampleVvvfEndFrame - 32.0);
+
+        double loopSec = accel > 0.25 ? SAMPLE_VVVF_ACCEL_LOOP_SEC
+                : (accel < -0.25 ? SAMPLE_VVVF_DECEL_LOOP_SEC : SAMPLE_VVVF_LOOP_SEC);
+        int loopFrames = (int) (loopSec * sampleVvvfRate);
+        loopFrames = Math.max(12000, Math.min(loopFrames, Math.max(12000, src.length / 3)));
         double half = loopFrames * 0.5;
 
-        // Granular two-window loop. It lets a fixed vehicle speed hold a local piece of the real VVVF
-        // recording without the obvious click that a naive loop would create.
-        double rate;
-        if (accel > 0.35) rate = 1.10;
-        else if (accel < -0.35) rate = 0.72;
-        else rate = 0.88;
-        sampleLoopPhase += rate / loopFrames;
+        // Phase is also continuous. The center may move, but the read phase never resets.
+        double phaseRate;
+        if (accel > 0.25) {
+            phaseRate = 0.96 + clamp(accel / 28.0, 0.0, 0.26);
+        } else if (accel < -0.25) {
+            phaseRate = 0.64; // deceleration uses the same acceleration sample gently; no hard reverse scrub.
+        } else {
+            phaseRate = 0.82;
+        }
+        sampleLoopPhase += phaseRate / loopFrames;
         sampleLoopPhase -= Math.floor(sampleLoopPhase);
 
+        // Two overlapping read heads create an equal-power local loop. Because the center is now
+        // smoothed, acceleration/deceleration no longer causes repeated hard seeks.
         double p1 = sampleLoopPhase;
         double p2 = p1 + 0.5;
         if (p2 >= 1.0) p2 -= 1.0;
         double e1 = Math.pow(Math.sin(Math.PI * p1), 2.0);
         double e2 = Math.pow(Math.sin(Math.PI * p2), 2.0);
-        double pos1 = center - half + p1 * loopFrames;
-        double pos2 = center - half + p2 * loopFrames;
+        double pos1 = sampleLoopCenterFrame - half + p1 * loopFrames;
+        double pos2 = sampleLoopCenterFrame - half + p2 * loopFrames;
         double y = (sampleAt(src, pos1) * e1 + sampleAt(src, pos2) * e2) / Math.max(0.001, e1 + e2);
 
-        // Add very light low-speed carbody/rail bed texture, but keep the recording dominant.
-        double body = 0.016 * Math.sin(engineRumblePhase) + (random.nextDouble() - 0.5) * Math.min(0.018, speed / 8500.0);
-        engineRumblePhase = wrap(engineRumblePhase + TWO_PI * (12.0 + speed * 0.08) / SAMPLE_RATE);
-        return y * 1.28 + body;
+        // Light texture only. Keep the uploaded recording dominant.
+        double body = 0.010 * Math.sin(engineRumblePhase) + (random.nextDouble() - 0.5) * Math.min(0.010, speed / 12000.0);
+        engineRumblePhase = wrap(engineRumblePhase + TWO_PI * (10.0 + speed * 0.065) / SAMPLE_RATE);
+        double accelGain = accel > 0.25 ? 1.08 : (accel < -0.25 ? 0.72 : 0.88);
+        return y * accelGain * 1.20 + body;
     }
 
     private double sampleAt(float[] src, double pos) {

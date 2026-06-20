@@ -18,6 +18,9 @@ public class SpeedCommandReceiver extends BroadcastReceiver {
         } else if ("com.jlxc.mikuvvvf.SET_STYLE".equals(action)) {
             service.setAction(VvvfSoundService.ACTION_SET_STYLE);
             service.putExtra(VvvfSoundService.EXTRA_STYLE, intent.getStringExtra("style"));
+        } else if ("com.jlxc.mikuvvvf.SET_HOOK".equals(action)) {
+            service.setAction(VvvfSoundService.ACTION_SET_HOOK);
+            service.putExtra(VvvfSoundService.EXTRA_HOOK_ENABLED, intent.getBooleanExtra("enabled", true));
         } else if ("com.jlxc.mikuvvvf.STOP".equals(action)) {
             service.setAction(VvvfSoundService.ACTION_STOP);
         } else {

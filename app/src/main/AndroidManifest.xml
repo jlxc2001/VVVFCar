@@ -1,4 +1,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <queries>
+        <package android:name="com.ts.MainUI" />
+        <intent><action android:name="com.ts.can.carinfo.CarInfoService" /></intent>
+        <intent><action android:name="com.ts.tsspeechlib.car.TsCarService" /></intent>
+    </queries>
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
@@ -31,6 +36,7 @@
             <intent-filter>
                 <action android:name="com.jlxc.mikuvvvf.SET_SPEED" />
                 <action android:name="com.jlxc.mikuvvvf.SET_STYLE" />
+                <action android:name="com.jlxc.mikuvvvf.SET_HOOK" />
                 <action android:name="com.jlxc.mikuvvvf.STOP" />
             </intent-filter>
         </receiver>
