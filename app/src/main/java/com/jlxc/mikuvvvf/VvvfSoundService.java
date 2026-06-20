@@ -185,8 +185,13 @@ public class VvvfSoundService extends Service {
     private void applyStyle(String styleName) {
         if (styleName == null) return;
         String s = styleName.trim().toUpperCase(Locale.US);
-        if (s.contains("IGBT")) engine.setStyle(VvvfSynthEngine.Style.IGBT);
-        if (s.contains("GTO")) engine.setStyle(VvvfSynthEngine.Style.GTO);
+        if (s.contains("SIEMENS") || s.contains("GUANGZHOU") || s.contains("GZ") || s.contains("A1") || s.contains("广东") || s.contains("广州") || s.contains("西门子")) {
+            engine.setStyle(VvvfSynthEngine.Style.SIEMENS_GZ_GTO);
+        } else if (s.contains("IGBT")) {
+            engine.setStyle(VvvfSynthEngine.Style.IGBT);
+        } else if (s.contains("GTO")) {
+            engine.setStyle(VvvfSynthEngine.Style.GTO);
+        }
     }
 
     private void createChannel() {

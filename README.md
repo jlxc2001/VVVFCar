@@ -1,25 +1,35 @@
 # Miku VVVF Sound Demo
 
-车速绑定 VVVF 声浪模拟 Demo。  
-
-## V2 更新
-
-这一版不再使用纯线性频率上升，而是加入了分段调制：
-
-- GTO：起步脉冲 → 异步上扫 → 同步一段 → 同步二段 → 高速弱磁。
-- IGBT：低速顺滑 → 异步上扫 → 同步啸叫 → 高速轻鸣。
-- 在 8 / 24 / 42 / 68 km/h 附近加入明显换段听感，避免第一版那种“线性电子哨声”。
-- 减速时会叠加一点再生制动感。
+车速绑定 VVVF 声浪模拟 Demo。
 
 包名：`com.jlxc.mikuvvvf`  
 默认 UDP 端口：`47230`
+
+## V3 更新：广东地铁西门子 GTO 预设
+
+这一版新增了独立预设：
+
+- `SIEMENS_GZ_GTO`：广东/广州地铁西门子 GTO-VVVF 风格。
+- 目标听感参考广州地铁 1 号线 A1 / Adtranz-Siemens GTO-VVVF 的“地铁味”。
+- 不再只做普通分段升频，而是加入：
+  - 低速 GTO 起步敲击；
+  - 5.5 / 18 / 32 / 52 / 78 km/h 多段切换；
+  - 中低速阶梯式音阶；
+  - 中速二阶段/三阶段锁相啸叫；
+  - 高速弱磁细高频；
+  - 轻微轨道/车厢底噪，让声音更像地铁而不是单纯电子哨声。
+
+保留旧预设：
+
+- `GTO`：通用粗糙老电车。
+- `IGBT`：通用顺滑现代电车。
 
 ## 功能
 
 - Android `AudioTrack` 实时合成声音，不依赖 mp3 循环。
 - 主界面支持手动速度滑条。
 - 支持自动 `0 → 100 → 0 km/h` 测试。
-- 支持 `GTO` / `IGBT` 两种风格，且都带分段调制。
+- 支持 `SIEMENS_GZ_GTO` / `GTO` / `IGBT` 三种风格。
 - 支持音量、静音。
 - 支持 UDP 局域网车速输入。
 - 支持 ADB Broadcast 模拟车速。
@@ -31,6 +41,12 @@
 
 ```text
 SPEED 45.0
+```
+
+切换广东地铁西门子预设：
+
+```text
+STYLE SIEMENS_GZ_GTO
 ```
 
 其他指令：
@@ -45,7 +61,7 @@ PING
 STOP
 ```
 
-`STATE` 也能收，但第一版只使用第一个车速字段：
+`STATE` 也能收，但当前只使用第一个车速字段：
 
 ```text
 STATE 37.5 1800 1
@@ -56,6 +72,7 @@ STATE 37.5 1800 1
 ```bash
 adb shell am broadcast -a com.jlxc.mikuvvvf.SET_SPEED --ef speed 45
 adb shell am broadcast -a com.jlxc.mikuvvvf.SET_SPEED --ef speed 0
+adb shell am broadcast -a com.jlxc.mikuvvvf.SET_STYLE --es style SIEMENS_GZ_GTO
 adb shell am broadcast -a com.jlxc.mikuvvvf.SET_STYLE --es style GTO
 adb shell am broadcast -a com.jlxc.mikuvvvf.SET_STYLE --es style IGBT
 adb shell am broadcast -a com.jlxc.mikuvvvf.STOP
@@ -68,6 +85,15 @@ PowerShell 可用下面命令发 UDP：
 ```powershell
 $udp = New-Object System.Net.Sockets.UdpClient
 $bytes = [Text.Encoding]::UTF8.GetBytes("SPEED 45")
+$udp.Send($bytes, $bytes.Length, "车机IP", 47230)
+$udp.Close()
+```
+
+切换到广东地铁西门子预设：
+
+```powershell
+$udp = New-Object System.Net.Sockets.UdpClient
+$bytes = [Text.Encoding]::UTF8.GetBytes("STYLE SIEMENS_GZ_GTO")
 $udp.Send($bytes, $bytes.Length, "车机IP", 47230)
 $udp.Close()
 ```

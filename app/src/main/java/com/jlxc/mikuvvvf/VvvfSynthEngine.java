@@ -11,7 +11,7 @@ import java.util.Random;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class VvvfSynthEngine {
-    public enum Style { GTO, IGBT }
+    public enum Style { GTO, IGBT, SIEMENS_GZ_GTO }
 
     public interface StatusListener {
         void onStatus(String text);
@@ -195,18 +195,27 @@ public class VvvfSynthEngine {
                     + 0.07 * Math.sin(5.0 * motorPhase);
 
             double wave;
-            if (currentStyle == Style.GTO) {
+            if (currentStyle == Style.SIEMENS_GZ_GTO) {
+                wave = renderGuangzhouSiemensGtoWave(stage, speed, motor, gating);
+            } else if (currentStyle == Style.GTO) {
                 wave = renderGtoWave(stage, motor, gating);
             } else {
                 wave = renderIgbtWave(stage, motor, gating);
             }
 
             // 在几个速度阈值附近加一点“换段啸叫”，听起来会像进入二阶段/三阶段。
-            double transition = currentStyle == Style.GTO
-                    ? max3(stagePulse(speed, 8.0, 2.0), stagePulse(speed, 24.0, 2.8),
-                           Math.max(stagePulse(speed, 42.0, 3.0), stagePulse(speed, 68.0, 4.0)))
-                    : max3(stagePulse(speed, 16.0, 3.0), stagePulse(speed, 36.0, 4.0), stagePulse(speed, 78.0, 6.0));
-            double chirpHz = currentStyle == Style.GTO ? 1100.0 + speed * 33.0 : 1800.0 + speed * 42.0;
+            double transition;
+            if (currentStyle == Style.SIEMENS_GZ_GTO) {
+                transition = max5(stagePulse(speed, 5.5, 1.4), stagePulse(speed, 18.0, 2.3),
+                        stagePulse(speed, 32.0, 2.5), stagePulse(speed, 52.0, 3.5), stagePulse(speed, 78.0, 5.0));
+            } else if (currentStyle == Style.GTO) {
+                transition = max3(stagePulse(speed, 8.0, 2.0), stagePulse(speed, 24.0, 2.8),
+                        Math.max(stagePulse(speed, 42.0, 3.0), stagePulse(speed, 68.0, 4.0)));
+            } else {
+                transition = max3(stagePulse(speed, 16.0, 3.0), stagePulse(speed, 36.0, 4.0), stagePulse(speed, 78.0, 6.0));
+            }
+            double chirpHz = currentStyle == Style.SIEMENS_GZ_GTO ? 520.0 + speed * 31.0
+                    : (currentStyle == Style.GTO ? 1100.0 + speed * 33.0 : 1800.0 + speed * 42.0);
             transitionPhase += TWO_PI * chirpHz / SAMPLE_RATE;
             if (transitionPhase > TWO_PI) transitionPhase -= TWO_PI;
             wave = wave * (1.0 - 0.18 * transition) + Math.sin(transitionPhase + motorPhase * 0.4) * 0.40 * transition;
@@ -233,6 +242,58 @@ public class VvvfSynthEngine {
 
             double sample = softClip(wave * amp);
             out[i] = (short) Math.max(Short.MIN_VALUE, Math.min(Short.MAX_VALUE, sample * 32767.0));
+        }
+    }
+
+
+    private double renderGuangzhouSiemensGtoWave(int stage, double speed, double motor, double gating) {
+        // 目标听感：广州地铁 1 号线 A1 / Adtranz-Siemens GTO-VVVF 那类“地铁味”。
+        // 重点不是线性升频，而是低速断续脉冲、中速阶梯音阶、高速锁相啸叫。
+        double squareCarrier = Math.sin(carrierPhase) >= 0 ? 1.0 : -1.0;
+        double subSquare = Math.sin(subCarrierPhase) >= 0 ? 1.0 : -1.0;
+        double sineCarrier = Math.sin(carrierPhase + 1.15 * Math.sin(motorPhase));
+        double sineSub = Math.sin(subCarrierPhase + 0.65 * Math.sin(2.0 * motorPhase));
+        double rumble = Math.sin(motorPhase * 0.48) + 0.30 * Math.sin(motorPhase * 0.96);
+        double railNoise = (random.nextDouble() - 0.5) * (0.018 + Math.min(0.030, speed / 2600.0));
+
+        switch (stage) {
+            case 0: // 0-5.5 km/h：GTO 起步敲击，低频、断续、颗粒很重。
+                return 0.18 * motor
+                        + 0.42 * squareCarrier * (0.30 + 0.70 * gating)
+                        + 0.24 * saw(carrierPhase) * gating
+                        + 0.20 * rumble
+                        + railNoise;
+            case 1: // 5.5-18 km/h：第一段“唱起来”，载波按音阶阶梯上扬。
+                return 0.22 * motor
+                        + 0.48 * squareCarrier * gating
+                        + 0.22 * sineSub
+                        + 0.12 * saw(carrierPhase)
+                        + 0.10 * rumble
+                        + railNoise;
+            case 2: // 18-32 km/h：进入二阶段，音色突然更集中、更像地铁牵引箱啸叫。
+                return 0.28 * motor
+                        + 0.44 * Math.sin(carrierPhase + 2.8 * Math.sin(motorPhase)) * gating
+                        + 0.25 * subSquare * (0.45 + 0.55 * gating)
+                        + 0.08 * rumble
+                        + railNoise * 0.85;
+            case 3: // 32-52 km/h：第三段，锁相比例变化，尖锐上扬但仍保留 GTO 粗颗粒。
+                return 0.26 * motor
+                        + 0.50 * Math.sin(carrierPhase + 1.9 * Math.sin(2.0 * motorPhase)) * gating
+                        + 0.18 * Math.sin(1.5 * carrierPhase + motorPhase)
+                        + 0.11 * subSquare
+                        + railNoise * 0.70;
+            case 4: // 52-78 km/h：高速同步段，声音变成更稳定的高频“地铁啸叫”。
+                return 0.20 * motor
+                        + 0.55 * sineCarrier
+                        + 0.22 * Math.sin(2.0 * carrierPhase + 0.5 * motorPhase)
+                        + 0.08 * sineSub
+                        + railNoise * 0.55;
+            default: // 78+ km/h：高速弱磁，牵引声变薄，留下细高频。
+                return 0.15 * motor
+                        + 0.46 * Math.sin(carrierPhase + 0.35 * Math.sin(motorPhase))
+                        + 0.18 * Math.sin(1.75 * carrierPhase)
+                        + 0.06 * rumble
+                        + railNoise * 0.42;
         }
     }
 
@@ -292,7 +353,14 @@ public class VvvfSynthEngine {
     }
 
     private int calcStage(double speed, Style style) {
-        if (style == Style.GTO) {
+        if (style == Style.SIEMENS_GZ_GTO) {
+            if (speed < 5.5) return 0;     // 起步敲击
+            if (speed < 18.0) return 1;    // 西门子一段音阶
+            if (speed < 32.0) return 2;    // 二阶段锁相
+            if (speed < 52.0) return 3;    // 三阶段啸叫
+            if (speed < 78.0) return 4;    // 高速同步
+            return 5;                      // 高速弱磁
+        } else if (style == Style.GTO) {
             if (speed < 8.0) return 0;     // 起步脉冲
             if (speed < 24.0) return 1;    // 异步调制
             if (speed < 42.0) return 2;    // 同步 1 段
@@ -308,7 +376,16 @@ public class VvvfSynthEngine {
 
     private String getStageName(double speed, Style style) {
         int stage = calcStage(speed, style);
-        if (style == Style.GTO) {
+        if (style == Style.SIEMENS_GZ_GTO) {
+            switch (stage) {
+                case 0: return "广铁西门子·起步敲击";
+                case 1: return "广铁西门子·一段音阶";
+                case 2: return "广铁西门子·二阶段锁相";
+                case 3: return "广铁西门子·三阶段啸叫";
+                case 4: return "广铁西门子·高速同步";
+                default: return "广铁西门子·高速弱磁";
+            }
+        } else if (style == Style.GTO) {
             switch (stage) {
                 case 0: return "起步脉冲";
                 case 1: return "异步上扫";
@@ -328,7 +405,26 @@ public class VvvfSynthEngine {
 
     private double calcMotorHz(double speed, Style style) {
         double hz;
-        if (style == Style.GTO) {
+        if (style == Style.SIEMENS_GZ_GTO) {
+            if (speed < 5.5) {
+                hz = 7.0 + speed * 1.35;
+                hz = quantize(hz, 1.3);
+            } else if (speed < 18.0) {
+                hz = 15.0 + (speed - 5.5) * 2.75;
+                hz = quantize(hz, 2.7);
+            } else if (speed < 32.0) {
+                hz = 49.0 + (speed - 18.0) * 1.95;
+                hz = quantize(hz, 3.8);
+            } else if (speed < 52.0) {
+                hz = 78.0 + (speed - 32.0) * 1.20;
+                hz = quantize(hz, 5.2);
+            } else if (speed < 78.0) {
+                hz = 103.0 + (speed - 52.0) * 0.86;
+            } else {
+                hz = 126.0 + (speed - 78.0) * 0.45;
+            }
+            return clamp(hz, 0.0, 185.0);
+        } else if (style == Style.GTO) {
             if (speed < 8.0) {
                 hz = 8.0 + speed * 1.15;
                 hz = quantize(hz, 1.8);
@@ -354,7 +450,27 @@ public class VvvfSynthEngine {
     }
 
     private double calcCarrierHz(double speed, Style style, double motorHz) {
-        if (style == Style.GTO) {
+        if (style == Style.SIEMENS_GZ_GTO) {
+            // 用阶梯载波模拟西门子 GTO 的“地铁音阶感”。
+            if (speed < 5.5) {
+                return quantize(120.0 + speed * 38.0, 24.0);
+            } else if (speed < 18.0) {
+                double[] notes = {300.0, 360.0, 430.0, 520.0, 620.0, 740.0, 880.0};
+                double pos = (speed - 5.5) / 1.85;
+                int idx = (int) clamp(Math.floor(pos), 0, notes.length - 1);
+                double glide = pos - Math.floor(pos);
+                double next = notes[Math.min(notes.length - 1, idx + 1)];
+                return notes[idx] * (1.0 - glide * 0.28) + next * (glide * 0.28);
+            } else if (speed < 32.0) {
+                return clamp(motorHz * 15.0, 760.0, 1280.0);
+            } else if (speed < 52.0) {
+                return clamp(motorHz * 23.5, 1450.0, 2350.0);
+            } else if (speed < 78.0) {
+                return clamp(motorHz * 31.0, 2600.0, 3850.0);
+            } else {
+                return clamp(3750.0 + (speed - 78.0) * 5.2, 3750.0, 4700.0);
+            }
+        } else if (style == Style.GTO) {
             if (speed < 8.0) {
                 return 180.0 + speed * 48.0;
             } else if (speed < 24.0) {
@@ -378,7 +494,15 @@ public class VvvfSynthEngine {
     }
 
     private double calcSubCarrierHz(double speed, Style style, double motorHz) {
-        if (style == Style.GTO) {
+        if (style == Style.SIEMENS_GZ_GTO) {
+            int stage = calcStage(speed, style);
+            if (stage == 0) return 85.0 + speed * 9.0;
+            if (stage == 1) return quantize(180.0 + speed * 21.0, 30.0);
+            if (stage == 2) return motorHz * 7.5;
+            if (stage == 3) return motorHz * 11.8;
+            if (stage == 4) return motorHz * 16.0;
+            return motorHz * 20.0;
+        } else if (style == Style.GTO) {
             int stage = calcStage(speed, style);
             if (stage <= 1) return 110.0 + speed * 13.0;
             if (stage == 2) return motorHz * 9.0;
@@ -399,6 +523,10 @@ public class VvvfSynthEngine {
 
     private static double max3(double a, double b, double c) {
         return Math.max(a, Math.max(b, c));
+    }
+
+    private static double max5(double a, double b, double c, double d, double e) {
+        return Math.max(Math.max(a, b), Math.max(Math.max(c, d), e));
     }
 
     private static double quantize(double value, double step) {

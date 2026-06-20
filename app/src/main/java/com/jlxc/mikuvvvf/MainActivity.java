@@ -36,6 +36,7 @@ public class MainActivity extends Activity {
     private Switch muteSwitch;
     private RadioButton gtoButton;
     private RadioButton igbtButton;
+    private RadioButton siemensButton;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private boolean autoTest = false;
@@ -85,7 +86,7 @@ public class MainActivity extends Activity {
         root.addView(title, matchWrap());
 
         TextView sub = new TextView(this);
-        sub.setText("车速绑定 VVVF 声浪模拟 V2 · 分段调制 · UDP 47230");
+        sub.setText("车速绑定 VVVF 声浪模拟 V3 · 广东地铁西门子预设 · UDP 47230");
         sub.setTextSize(14);
         sub.setGravity(Gravity.CENTER_HORIZONTAL);
         sub.setPadding(0, dp(6), 0, dp(12));
@@ -165,27 +166,32 @@ public class MainActivity extends Activity {
         root.addView(styleLabel, matchWrap());
 
         RadioGroup styleGroup = new RadioGroup(this);
-        styleGroup.setOrientation(RadioGroup.HORIZONTAL);
+        styleGroup.setOrientation(RadioGroup.VERTICAL);
+        siemensButton = new RadioButton(this);
+        siemensButton.setText("广东地铁西门子 GTO / 广州 1 号线 A1 味");
+        siemensButton.setId(1003);
         gtoButton = new RadioButton(this);
-        gtoButton.setText("GTO 粗糙老电车");
+        gtoButton.setText("通用 GTO 粗糙老电车");
         gtoButton.setId(1001);
         igbtButton = new RadioButton(this);
-        igbtButton.setText("IGBT 顺滑现代电车");
+        igbtButton.setText("通用 IGBT 顺滑现代电车");
         igbtButton.setId(1002);
-        styleGroup.addView(gtoButton, weightWrap(1));
-        styleGroup.addView(igbtButton, weightWrap(1));
-        gtoButton.setChecked(true);
+        styleGroup.addView(siemensButton, matchWrap());
+        styleGroup.addView(gtoButton, matchWrap());
+        styleGroup.addView(igbtButton, matchWrap());
+        siemensButton.setChecked(true);
         root.addView(styleGroup, matchWrap());
 
         TextView stageHint = new TextView(this);
-        stageHint.setText("GTO 换段：8 / 24 / 42 / 68 km/h；IGBT 换段：16 / 36 / 78 km/h");
+        stageHint.setText("西门子换段：5.5 / 18 / 32 / 52 / 78 km/h；GTO：8 / 24 / 42 / 68；IGBT：16 / 36 / 78");
         stageHint.setTextSize(13);
         stageHint.setTextColor(Color.DKGRAY);
         stageHint.setPadding(0, dp(2), 0, dp(6));
         root.addView(stageHint, matchWrap());
 
         styleGroup.setOnCheckedChangeListener((group, checkedId) -> {
-            if (checkedId == 1002) sendStyle("IGBT");
+            if (checkedId == 1003) sendStyle("SIEMENS_GZ_GTO");
+            else if (checkedId == 1002) sendStyle("IGBT");
             else sendStyle("GTO");
         });
 
@@ -238,7 +244,9 @@ public class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(i);
         else startService(i);
         sendVolume(volumeSeek == null ? 0.55f : volumeSeek.getProgress() / 100f);
-        if (gtoButton == null || gtoButton.isChecked()) sendStyle("GTO"); else sendStyle("IGBT");
+        if (siemensButton == null || siemensButton.isChecked()) sendStyle("SIEMENS_GZ_GTO");
+        else if (gtoButton != null && gtoButton.isChecked()) sendStyle("GTO");
+        else sendStyle("IGBT");
     }
 
     private void sendSpeed(float speed) {
@@ -278,9 +286,11 @@ public class MainActivity extends Activity {
         String ip = getLocalIpv4();
         String text = "局域网 UDP 指令：\n"
                 + "  echo SPEED 45 | nc -u " + (TextUtils.isEmpty(ip) ? "车机IP" : ip) + " 47230\n"
+                + "  echo STYLE SIEMENS_GZ_GTO | nc -u " + (TextUtils.isEmpty(ip) ? "车机IP" : ip) + " 47230\n"
                 + "  echo STYLE IGBT | nc -u " + (TextUtils.isEmpty(ip) ? "车机IP" : ip) + " 47230\n\n"
                 + "ADB 调试：\n"
                 + "  adb shell am broadcast -a com.jlxc.mikuvvvf.SET_SPEED --ef speed 45\n"
+                + "  adb shell am broadcast -a com.jlxc.mikuvvvf.SET_STYLE --es style SIEMENS_GZ_GTO\n"
                 + "  adb shell am broadcast -a com.jlxc.mikuvvvf.SET_STYLE --es style GTO\n"
                 + "  adb shell am broadcast -a com.jlxc.mikuvvvf.STOP\n\n"
                 + "后续接入 MikuCarLauncher 时，只要持续发送 SPEED 当前车速 即可。";
