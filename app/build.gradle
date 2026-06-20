@@ -15,7 +15,7 @@ android {
         applicationId 'com.jlxc.mikuvvvf'
         minSdk 23
         targetSdk 35
-        versionCode 1
-        versionName '1.0-demo'
+        versionCode 4
+        versionName '1.0-v4-sound-modes'
     }
 }

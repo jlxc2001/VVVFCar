@@ -2,7 +2,6 @@ package com.jlxc.mikuvvvf;
 
 import android.Manifest;
 import android.app.Activity;
-import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
@@ -29,6 +28,15 @@ import java.util.Collections;
 import java.util.Locale;
 
 public class MainActivity extends Activity {
+    private static final int ID_GTO = 1001;
+    private static final int ID_IGBT = 1002;
+    private static final int ID_SIEMENS = 1003;
+    private static final int ID_AIRCRAFT = 1004;
+    private static final int ID_POP_BANG = 1005;
+    private static final int ID_NA = 1006;
+    private static final int ID_ROTARY = 1007;
+    private static final int ID_SUPERCHARGED_V8 = 1008;
+
     private TextView speedText;
     private TextView infoText;
     private SeekBar speedSeek;
@@ -37,6 +45,11 @@ public class MainActivity extends Activity {
     private RadioButton gtoButton;
     private RadioButton igbtButton;
     private RadioButton siemensButton;
+    private RadioButton aircraftButton;
+    private RadioButton popBangButton;
+    private RadioButton naButton;
+    private RadioButton rotaryButton;
+    private RadioButton superchargedV8Button;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private boolean autoTest = false;
@@ -46,12 +59,12 @@ public class MainActivity extends Activity {
     private final Runnable autoRunnable = new Runnable() {
         @Override public void run() {
             if (!autoTest) return;
-            autoSpeed += autoDirection * 0.8f;
-            if (autoSpeed >= 100f) { autoSpeed = 100f; autoDirection = -1; }
+            autoSpeed += autoDirection * 0.25f; // V4：比旧版慢很多，方便听清换段/升挡。
+            if (autoSpeed >= 120f) { autoSpeed = 120f; autoDirection = -1; }
             if (autoSpeed <= 0f) { autoSpeed = 0f; autoDirection = 1; }
             speedSeek.setProgress(Math.round(autoSpeed * 10f));
             sendSpeed(autoSpeed);
-            handler.postDelayed(this, 45);
+            handler.postDelayed(this, 80);
         }
     };
 
@@ -79,14 +92,14 @@ public class MainActivity extends Activity {
         scroll.addView(root);
 
         TextView title = new TextView(this);
-        title.setText("Miku VVVF Sound Demo");
-        title.setTextSize(26);
+        title.setText("Miku VVVF / Engine Sound Demo");
+        title.setTextSize(25);
         title.setTextColor(Color.rgb(0, 120, 130));
         title.setGravity(Gravity.CENTER_HORIZONTAL);
         root.addView(title, matchWrap());
 
         TextView sub = new TextView(this);
-        sub.setText("车速绑定 VVVF 声浪模拟 V3 · 广东地铁西门子预设 · UDP 47230");
+        sub.setText("车速绑定声浪模拟 V4 · VVVF + 飞机 + 发动机 · UDP 47230");
         sub.setTextSize(14);
         sub.setGravity(Gravity.CENTER_HORIZONTAL);
         sub.setPadding(0, dp(6), 0, dp(12));
@@ -100,7 +113,7 @@ public class MainActivity extends Activity {
         root.addView(speedText, matchWrap());
 
         speedSeek = new SeekBar(this);
-        speedSeek.setMax(1200); // 0.0 - 120.0 km/h
+        speedSeek.setMax(2400); // 0.0 - 240.0 km/h
         speedSeek.setProgress(0);
         speedSeek.setPadding(0, dp(8), 0, dp(8));
         root.addView(speedSeek, matchWrap());
@@ -146,19 +159,19 @@ public class MainActivity extends Activity {
         });
 
         Button auto = new Button(this);
-        auto.setText("自动 0→100→0 测试");
+        auto.setText("慢速自动 0→120→0 测试");
         root.addView(auto, matchWrap());
         auto.setOnClickListener(v -> {
             autoTest = !autoTest;
             if (autoTest) {
                 autoSpeed = speedSeek.getProgress() / 10f;
-                autoDirection = autoSpeed >= 100f ? -1 : 1;
+                autoDirection = autoSpeed >= 120f ? -1 : 1;
                 handler.removeCallbacks(autoRunnable);
                 handler.post(autoRunnable);
                 auto.setText("停止自动测试");
             } else {
                 handler.removeCallbacks(autoRunnable);
-                auto.setText("自动 0→100→0 测试");
+                auto.setText("慢速自动 0→120→0 测试");
             }
         });
 
@@ -167,33 +180,27 @@ public class MainActivity extends Activity {
 
         RadioGroup styleGroup = new RadioGroup(this);
         styleGroup.setOrientation(RadioGroup.VERTICAL);
-        siemensButton = new RadioButton(this);
-        siemensButton.setText("广东地铁西门子 GTO / 广州 1 号线 A1 味");
-        siemensButton.setId(1003);
-        gtoButton = new RadioButton(this);
-        gtoButton.setText("通用 GTO 粗糙老电车");
-        gtoButton.setId(1001);
-        igbtButton = new RadioButton(this);
-        igbtButton.setText("通用 IGBT 顺滑现代电车");
-        igbtButton.setId(1002);
-        styleGroup.addView(siemensButton, matchWrap());
-        styleGroup.addView(gtoButton, matchWrap());
-        styleGroup.addView(igbtButton, matchWrap());
+
+        siemensButton = addStyleRadio(styleGroup, ID_SIEMENS, "广东地铁西门子 GTO / 广州 1 号线 A1 味");
+        gtoButton = addStyleRadio(styleGroup, ID_GTO, "通用 GTO 粗糙老电车");
+        igbtButton = addStyleRadio(styleGroup, ID_IGBT, "通用 IGBT 顺滑现代电车");
+        aircraftButton = addStyleRadio(styleGroup, ID_AIRCRAFT, "飞机 / 涡扇引擎推进感");
+        popBangButton = addStyleRadio(styleGroup, ID_POP_BANG, "改偏时点火 / 涡轮回火放炮");
+        naButton = addStyleRadio(styleGroup, ID_NA, "自然吸气 / 高转进气声");
+        rotaryButton = addStyleRadio(styleGroup, ID_ROTARY, "转子发动机 / 高转蜂鸣");
+        superchargedV8Button = addStyleRadio(styleGroup, ID_SUPERCHARGED_V8, "地狱猫风格 / 机械增压 V8");
+
         siemensButton.setChecked(true);
         root.addView(styleGroup, matchWrap());
 
         TextView stageHint = new TextView(this);
-        stageHint.setText("西门子换段：5.5 / 18 / 32 / 52 / 78 km/h；GTO：8 / 24 / 42 / 68；IGBT：16 / 36 / 78");
+        stageHint.setText("V4：自动测试已放慢；发动机类使用车速模拟虚拟挡位/RPM，所以只发 SPEED 也能听到升挡掉转。真实接车后，后续可再加入 RPM/油门/刹车数据。");
         stageHint.setTextSize(13);
         stageHint.setTextColor(Color.DKGRAY);
         stageHint.setPadding(0, dp(2), 0, dp(6));
         root.addView(stageHint, matchWrap());
 
-        styleGroup.setOnCheckedChangeListener((group, checkedId) -> {
-            if (checkedId == 1003) sendStyle("SIEMENS_GZ_GTO");
-            else if (checkedId == 1002) sendStyle("IGBT");
-            else sendStyle("GTO");
-        });
+        styleGroup.setOnCheckedChangeListener((group, checkedId) -> sendStyle(styleFromId(checkedId)));
 
         TextView volLabel = label("音量");
         root.addView(volLabel, matchWrap());
@@ -229,6 +236,25 @@ public class MainActivity extends Activity {
         return scroll;
     }
 
+    private RadioButton addStyleRadio(RadioGroup group, int id, String text) {
+        RadioButton b = new RadioButton(this);
+        b.setId(id);
+        b.setText(text);
+        group.addView(b, matchWrap());
+        return b;
+    }
+
+    private String styleFromId(int checkedId) {
+        if (checkedId == ID_SIEMENS) return "SIEMENS_GZ_GTO";
+        if (checkedId == ID_IGBT) return "IGBT";
+        if (checkedId == ID_AIRCRAFT) return "AIRCRAFT_TURBINE";
+        if (checkedId == ID_POP_BANG) return "POP_BANG_TURBO";
+        if (checkedId == ID_NA) return "NATURAL_ASPIRATED";
+        if (checkedId == ID_ROTARY) return "ROTARY";
+        if (checkedId == ID_SUPERCHARGED_V8) return "SUPERCHARGED_V8";
+        return "GTO";
+    }
+
     private TextView label(String text) {
         TextView v = new TextView(this);
         v.setText(text);
@@ -246,7 +272,12 @@ public class MainActivity extends Activity {
         sendVolume(volumeSeek == null ? 0.55f : volumeSeek.getProgress() / 100f);
         if (siemensButton == null || siemensButton.isChecked()) sendStyle("SIEMENS_GZ_GTO");
         else if (gtoButton != null && gtoButton.isChecked()) sendStyle("GTO");
-        else sendStyle("IGBT");
+        else if (igbtButton != null && igbtButton.isChecked()) sendStyle("IGBT");
+        else if (aircraftButton != null && aircraftButton.isChecked()) sendStyle("AIRCRAFT_TURBINE");
+        else if (popBangButton != null && popBangButton.isChecked()) sendStyle("POP_BANG_TURBO");
+        else if (naButton != null && naButton.isChecked()) sendStyle("NATURAL_ASPIRATED");
+        else if (rotaryButton != null && rotaryButton.isChecked()) sendStyle("ROTARY");
+        else if (superchargedV8Button != null && superchargedV8Button.isChecked()) sendStyle("SUPERCHARGED_V8");
     }
 
     private void sendSpeed(float speed) {
@@ -284,14 +315,20 @@ public class MainActivity extends Activity {
 
     private void updateInfoText() {
         String ip = getLocalIpv4();
+        String host = TextUtils.isEmpty(ip) ? "车机IP" : ip;
         String text = "局域网 UDP 指令：\n"
-                + "  echo SPEED 45 | nc -u " + (TextUtils.isEmpty(ip) ? "车机IP" : ip) + " 47230\n"
-                + "  echo STYLE SIEMENS_GZ_GTO | nc -u " + (TextUtils.isEmpty(ip) ? "车机IP" : ip) + " 47230\n"
-                + "  echo STYLE IGBT | nc -u " + (TextUtils.isEmpty(ip) ? "车机IP" : ip) + " 47230\n\n"
+                + "  echo SPEED 45 | nc -u " + host + " 47230\n"
+                + "  echo STYLE SIEMENS_GZ_GTO | nc -u " + host + " 47230\n"
+                + "  echo STYLE AIRCRAFT_TURBINE | nc -u " + host + " 47230\n"
+                + "  echo STYLE POP_BANG_TURBO | nc -u " + host + " 47230\n"
+                + "  echo STYLE NATURAL_ASPIRATED | nc -u " + host + " 47230\n"
+                + "  echo STYLE ROTARY | nc -u " + host + " 47230\n"
+                + "  echo STYLE SUPERCHARGED_V8 | nc -u " + host + " 47230\n\n"
                 + "ADB 调试：\n"
                 + "  adb shell am broadcast -a com.jlxc.mikuvvvf.SET_SPEED --ef speed 45\n"
                 + "  adb shell am broadcast -a com.jlxc.mikuvvvf.SET_STYLE --es style SIEMENS_GZ_GTO\n"
-                + "  adb shell am broadcast -a com.jlxc.mikuvvvf.SET_STYLE --es style GTO\n"
+                + "  adb shell am broadcast -a com.jlxc.mikuvvvf.SET_STYLE --es style POP_BANG_TURBO\n"
+                + "  adb shell am broadcast -a com.jlxc.mikuvvvf.SET_STYLE --es style SUPERCHARGED_V8\n"
                 + "  adb shell am broadcast -a com.jlxc.mikuvvvf.STOP\n\n"
                 + "后续接入 MikuCarLauncher 时，只要持续发送 SPEED 当前车速 即可。";
         infoText.setText(text);

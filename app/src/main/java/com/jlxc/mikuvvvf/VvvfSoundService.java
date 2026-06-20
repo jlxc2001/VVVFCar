@@ -185,7 +185,17 @@ public class VvvfSoundService extends Service {
     private void applyStyle(String styleName) {
         if (styleName == null) return;
         String s = styleName.trim().toUpperCase(Locale.US);
-        if (s.contains("SIEMENS") || s.contains("GUANGZHOU") || s.contains("GZ") || s.contains("A1") || s.contains("广东") || s.contains("广州") || s.contains("西门子")) {
+        if (s.contains("AIR") || s.contains("PLANE") || s.contains("JET") || s.contains("TURBINE") || s.contains("飞机") || s.contains("涡扇")) {
+            engine.setStyle(VvvfSynthEngine.Style.AIRCRAFT_TURBINE);
+        } else if (s.contains("POP") || s.contains("BANG") || s.contains("ANTI") || s.contains("TURBO") || s.contains("偏时") || s.contains("回火") || s.contains("放炮")) {
+            engine.setStyle(VvvfSynthEngine.Style.POP_BANG_TURBO);
+        } else if (s.contains("NATURAL") || s.contains("ASPIRATED") || s.equals("NA") || s.contains("自然吸气") || s.contains("自吸")) {
+            engine.setStyle(VvvfSynthEngine.Style.NATURAL_ASPIRATED);
+        } else if (s.contains("ROTARY") || s.contains("WANKEL") || s.contains("转子")) {
+            engine.setStyle(VvvfSynthEngine.Style.ROTARY);
+        } else if (s.contains("SUPERCHARGED") || s.contains("HELLCAT") || s.contains("V8") || s.contains("地狱猫") || s.contains("机械增压")) {
+            engine.setStyle(VvvfSynthEngine.Style.SUPERCHARGED_V8);
+        } else if (s.contains("SIEMENS") || s.contains("GUANGZHOU") || s.contains("GZ") || s.contains("A1") || s.contains("广东") || s.contains("广州") || s.contains("西门子")) {
             engine.setStyle(VvvfSynthEngine.Style.SIEMENS_GZ_GTO);
         } else if (s.contains("IGBT")) {
             engine.setStyle(VvvfSynthEngine.Style.IGBT);
@@ -200,7 +210,7 @@ public class VvvfSoundService extends Service {
                     CHANNEL_ID,
                     "Miku VVVF Sound",
                     NotificationManager.IMPORTANCE_LOW);
-            channel.setDescription("Speed-bound VVVF sound service");
+            channel.setDescription("Speed-bound VVVF / engine sound service");
             NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
             if (manager != null) manager.createNotificationChannel(channel);
         }
@@ -216,7 +226,7 @@ public class VvvfSoundService extends Service {
                 : new Notification.Builder(this);
         return builder
                 .setSmallIcon(R.drawable.ic_stat_vvvf)
-                .setContentTitle("Miku VVVF Sound")
+                .setContentTitle("Miku VVVF / Engine Sound")
                 .setContentText(text)
                 .setContentIntent(pi)
                 .setOngoing(true)

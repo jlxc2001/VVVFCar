@@ -1,148 +1,106 @@
-# Miku VVVF Sound Demo
+# Miku VVVF / Engine Sound Demo
 
-车速绑定 VVVF 声浪模拟 Demo。
+车速绑定声浪模拟 Demo。第一用途是给 MikuCarLauncher / 车机项目测试：只要外部持续发送车速，本 App 就会用 `AudioTrack` 实时合成声音。
 
-包名：`com.jlxc.mikuvvvf`  
-默认 UDP 端口：`47230`
+## V4 更新
 
-## V3 更新：广东地铁西门子 GTO 预设
+- 自动测试从旧版的快速拉升改成慢速 `0 → 120 → 0 km/h`，方便听清 VVVF 换段和发动机升挡。
+- 保留原来的 VVVF 模式：
+  - `SIEMENS_GZ_GTO`：广东/广州地铁西门子 GTO 风格
+  - `GTO`：通用老式 GTO
+  - `IGBT`：通用现代 IGBT
+- 新增交通工具/发动机类声浪：
+  - `AIRCRAFT_TURBINE`：飞机/涡扇推进感
+  - `POP_BANG_TURBO`：改偏时点火/涡轮回火放炮
+  - `NATURAL_ASPIRATED`：自然吸气/高转进气声
+  - `ROTARY`：转子发动机/高转蜂鸣
+  - `SUPERCHARGED_V8`：地狱猫风格/机械增压 V8
+- 发动机类模式会根据车速自动模拟虚拟挡位/RPM，因此只发送 `SPEED` 也能听到升挡掉转。
 
-这一版新增了独立预设：
+> 注意：这些都是算法合成的“风格近似”，不是对真实车辆/列车录音的采样复刻。后续如果接入真实 RPM、油门、刹车，发动机类声浪会更像。
 
-- `SIEMENS_GZ_GTO`：广东/广州地铁西门子 GTO-VVVF 风格。
-- 目标听感参考广州地铁 1 号线 A1 / Adtranz-Siemens GTO-VVVF 的“地铁味”。
-- 不再只做普通分段升频，而是加入：
-  - 低速 GTO 起步敲击；
-  - 5.5 / 18 / 32 / 52 / 78 km/h 多段切换；
-  - 中低速阶梯式音阶；
-  - 中速二阶段/三阶段锁相啸叫；
-  - 高速弱磁细高频；
-  - 轻微轨道/车厢底噪，让声音更像地铁而不是单纯电子哨声。
+## UDP 接口
 
-保留旧预设：
-
-- `GTO`：通用粗糙老电车。
-- `IGBT`：通用顺滑现代电车。
-
-## 功能
-
-- Android `AudioTrack` 实时合成声音，不依赖 mp3 循环。
-- 主界面支持手动速度滑条。
-- 支持自动 `0 → 100 → 0 km/h` 测试。
-- 支持 `SIEMENS_GZ_GTO` / `GTO` / `IGBT` 三种风格。
-- 支持音量、静音。
-- 支持 UDP 局域网车速输入。
-- 支持 ADB Broadcast 模拟车速。
-- 前台服务播放，避免后台被系统杀掉。
-
-## UDP 指令
-
-发送 UTF-8 文本到车机 / 手机 IP 的 `47230` 端口：
+默认监听：
 
 ```text
-SPEED 45.0
+UDP 47230
 ```
 
-切换广东地铁西门子预设：
+设置车速：
+
+```text
+SPEED 45
+```
+
+切换风格：
 
 ```text
 STYLE SIEMENS_GZ_GTO
+STYLE AIRCRAFT_TURBINE
+STYLE POP_BANG_TURBO
+STYLE NATURAL_ASPIRATED
+STYLE ROTARY
+STYLE SUPERCHARGED_V8
 ```
 
-其他指令：
+其他：
 
 ```text
-STYLE GTO
-STYLE IGBT
-VOLUME 0.65
+VOLUME 0.6
 MUTE 1
 UNMUTE
 PING
 STOP
 ```
 
-`STATE` 也能收，但当前只使用第一个车速字段：
-
-```text
-STATE 37.5 1800 1
-```
-
 ## ADB 调试
+
+设置车速：
 
 ```bash
 adb shell am broadcast -a com.jlxc.mikuvvvf.SET_SPEED --ef speed 45
-adb shell am broadcast -a com.jlxc.mikuvvvf.SET_SPEED --ef speed 0
+```
+
+切换声音风格：
+
+```bash
 adb shell am broadcast -a com.jlxc.mikuvvvf.SET_STYLE --es style SIEMENS_GZ_GTO
-adb shell am broadcast -a com.jlxc.mikuvvvf.SET_STYLE --es style GTO
-adb shell am broadcast -a com.jlxc.mikuvvvf.SET_STYLE --es style IGBT
+adb shell am broadcast -a com.jlxc.mikuvvvf.SET_STYLE --es style AIRCRAFT_TURBINE
+adb shell am broadcast -a com.jlxc.mikuvvvf.SET_STYLE --es style POP_BANG_TURBO
+adb shell am broadcast -a com.jlxc.mikuvvvf.SET_STYLE --es style NATURAL_ASPIRATED
+adb shell am broadcast -a com.jlxc.mikuvvvf.SET_STYLE --es style ROTARY
+adb shell am broadcast -a com.jlxc.mikuvvvf.SET_STYLE --es style SUPERCHARGED_V8
+```
+
+停止：
+
+```bash
 adb shell am broadcast -a com.jlxc.mikuvvvf.STOP
 ```
 
-## Windows 电脑测试 UDP
+## 接入 MikuCarLauncher
 
-PowerShell 可用下面命令发 UDP：
-
-```powershell
-$udp = New-Object System.Net.Sockets.UdpClient
-$bytes = [Text.Encoding]::UTF8.GetBytes("SPEED 45")
-$udp.Send($bytes, $bytes.Length, "车机IP", 47230)
-$udp.Close()
-```
-
-切换到广东地铁西门子预设：
-
-```powershell
-$udp = New-Object System.Net.Sockets.UdpClient
-$bytes = [Text.Encoding]::UTF8.GetBytes("STYLE SIEMENS_GZ_GTO")
-$udp.Send($bytes, $bytes.Length, "车机IP", 47230)
-$udp.Close()
-```
-
-模拟从 0 到 100：
-
-```powershell
-$udp = New-Object System.Net.Sockets.UdpClient
-for ($i=0; $i -le 100; $i++) {
-  $msg = "SPEED $i"
-  $bytes = [Text.Encoding]::UTF8.GetBytes($msg)
-  $udp.Send($bytes, $bytes.Length, "车机IP", 47230)
-  Start-Sleep -Milliseconds 80
-}
-$udp.Close()
-```
-
-## 接入 MikuCarLauncher 的建议
-
-在车机 Launcher 获取到车速后，以 10~20Hz 频率发送 UDP 即可：
+最简单只需要持续发送：
 
 ```text
 SPEED 当前车速
 ```
 
-例如：
+例如车速 37.5km/h：
 
 ```text
 SPEED 37.5
 ```
 
-第一版不需要转速、油门、刹车。App 内部会根据速度变化自动判断加速 / 减速 / 匀速。
-
-## 编译
-
-GitHub Actions 已包含在：
+后续可以扩展为：
 
 ```text
-.github/workflows/android-build.yml
+STATE speed rpm throttle brake
 ```
 
-手动构建：
+目前 V4 仍然只使用 `speed`，`rpm/throttle/brake` 预留。
 
-```bash
-gradle assembleDebug
-```
+## 构建
 
-产物位置：
-
-```text
-app/build/outputs/apk/debug/app-debug.apk
-```
+这是标准 Android Gradle 项目。上传到 GitHub 后可通过 `.github/workflows/android-build.yml` 自动构建 APK。
