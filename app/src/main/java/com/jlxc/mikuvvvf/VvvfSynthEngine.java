@@ -36,9 +36,13 @@ public class VvvfSynthEngine {
     private static final double TWO_PI = Math.PI * 2.0;
     private static final double SAMPLE_VVVF_MAX_SPEED_KMH = 140.0;
     private static final double SAMPLE_VVVF_START_TRIM_SEC = 0.55;
-    private static final double SAMPLE_VVVF_LOOP_SEC = 0.880;
-    private static final double SAMPLE_VVVF_ACCEL_LOOP_SEC = 1.420;
-    private static final double SAMPLE_VVVF_DECEL_LOOP_SEC = 1.180;
+    // V11 sample mode uses a game-style loop bank: instead of hard-scrubbing the
+    // long acceleration WAV, it crossfades between short speed bands, like many
+    // racing games crossfade engine loops across RPM bands. This avoids the
+    // old "du-du-du" artifact when Hook speed updates are slow or non-linear.
+    private static final double SAMPLE_VVVF_BAND_KMH = 5.0;
+    private static final double SAMPLE_VVVF_MIN_LOOP_SEC = 0.58;
+    private static final double SAMPLE_VVVF_MAX_LOOP_SEC = 1.08;
 
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final Random random = new Random(20260620L);
@@ -49,7 +53,9 @@ public class VvvfSynthEngine {
     private int sampleVvvfRate = SAMPLE_RATE;
     private String sampleVvvfStatus = "sample not loaded";
     private double sampleLoopPhase = 0.0;
+    private double sampleLoopPhaseB = 0.37;
     private double sampleLoopCenterFrame = -1.0;
+    private double samplePlaybackSpeedKmh = -1.0;
 
     private Thread audioThread;
     private AudioTrack audioTrack;
@@ -304,7 +310,9 @@ public class VvvfSynthEngine {
             popEnvelope = 0.0;
             overrunEnvelope = 0.0;
             sampleLoopPhase = 0.0;
+            sampleLoopPhaseB = 0.37;
             sampleLoopCenterFrame = -1.0;
+            samplePlaybackSpeedKmh = -1.0;
         }
     }
 
@@ -571,73 +579,89 @@ public class VvvfSynthEngine {
                     Math.sin(motorPhase), 0.50 + 0.50 * Math.abs(Math.sin(motorPhase)));
         }
 
-        double usable = Math.max(4.0, sampleVvvfEndFrame - sampleVvvfStartFrame - 2.0);
-        double norm = clamp(speed / SAMPLE_VVVF_MAX_SPEED_KMH, 0.0, 1.0);
-        // Keep low-speed material a little longer. This avoids jumping past the first Siemens/GTO
-        // step when the vehicle begins moving from 0km/h.
-        double eased = norm < 0.22 ? norm * 0.86 : 0.1892 + (norm - 0.22) * 1.04;
-        eased = clamp(eased, 0.0, 1.0);
-        double targetCenter = sampleVvvfStartFrame + eased * usable;
+        // Game-style sampled engine logic:
+        //   speed -> two neighbouring speed-loop bands -> equal-power crossfade.
+        // This is much closer to how games build smooth engine sound from a small set of
+        // RPM loops. The old single moving grain window could sound strange because it
+        // constantly moved the loop centre while the vehicle was accelerating.
+        if (samplePlaybackSpeedKmh < 0.0) samplePlaybackSpeedKmh = speed;
+        double followTau = accel > 0.25 ? 0.20 : (accel < -0.25 ? 0.34 : 0.52);
+        double followAlpha = 1.0 - Math.exp(-1.0 / (SAMPLE_RATE * followTau));
+        samplePlaybackSpeedKmh += (speed - samplePlaybackSpeedKmh) * followAlpha;
+        samplePlaybackSpeedKmh = clamp(samplePlaybackSpeedKmh, 0.0, SAMPLE_VVVF_MAX_SPEED_KMH);
 
-        if (sampleLoopCenterFrame < 0.0) {
-            sampleLoopCenterFrame = targetCenter;
-        }
+        double bandKmh = SAMPLE_VVVF_BAND_KMH;
+        double bandIndex = Math.floor(samplePlaybackSpeedKmh / bandKmh);
+        double lowerKmh = clamp(bandIndex * bandKmh, 0.0, SAMPLE_VVVF_MAX_SPEED_KMH);
+        double upperKmh = clamp(lowerKmh + bandKmh, 0.0, SAMPLE_VVVF_MAX_SPEED_KMH);
+        double bandFrac = upperKmh > lowerKmh ? (samplePlaybackSpeedKmh - lowerKmh) / (upperKmh - lowerKmh) : 0.0;
+        bandFrac = smoothstep(clamp(bandFrac, 0.0, 1.0));
 
-        // V6 used the target center directly. When speed changed, the grain window jumped every
-        // buffer and produced a "du-du-du" artifact. V7 uses a magnetic moving center: speed only
-        // pulls the sample window toward the target; the audio window itself stays continuous.
-        double absAccel = Math.abs(accel);
-        double tauSec;
-        double maxCenterMovePerOutputSample;
-        if (accel > 0.25) {
-            tauSec = 0.36;
-            maxCenterMovePerOutputSample = 2.20;
-        } else if (accel < -0.25) {
-            tauSec = 0.58;
-            maxCenterMovePerOutputSample = 1.15;
-        } else {
-            tauSec = 0.95;
-            maxCenterMovePerOutputSample = 0.42;
-        }
-        double centerAlpha = 1.0 - Math.exp(-1.0 / (SAMPLE_RATE * tauSec));
-        double wantedMove = (targetCenter - sampleLoopCenterFrame) * centerAlpha;
-        sampleLoopCenterFrame += clamp(wantedMove, -maxCenterMovePerOutputSample, maxCenterMovePerOutputSample);
-        sampleLoopCenterFrame = clamp(sampleLoopCenterFrame, sampleVvvfStartFrame + 32.0, sampleVvvfEndFrame - 32.0);
-
-        double loopSec = accel > 0.25 ? SAMPLE_VVVF_ACCEL_LOOP_SEC
-                : (accel < -0.25 ? SAMPLE_VVVF_DECEL_LOOP_SEC : SAMPLE_VVVF_LOOP_SEC);
+        double loopSec = SAMPLE_VVVF_MAX_LOOP_SEC
+                - (SAMPLE_VVVF_MAX_LOOP_SEC - SAMPLE_VVVF_MIN_LOOP_SEC)
+                * clamp(samplePlaybackSpeedKmh / SAMPLE_VVVF_MAX_SPEED_KMH, 0.0, 1.0);
+        if (Math.abs(accel) > 0.35) loopSec *= 0.92;
         int loopFrames = (int) (loopSec * sampleVvvfRate);
-        loopFrames = Math.max(12000, Math.min(loopFrames, Math.max(12000, src.length / 3)));
-        double half = loopFrames * 0.5;
+        int usableFrames = Math.max(8192, sampleVvvfEndFrame - sampleVvvfStartFrame - 256);
+        loopFrames = Math.max(8192, Math.min(loopFrames, usableFrames));
 
-        // Phase is also continuous. The center may move, but the read phase never resets.
-        double phaseRate;
-        if (accel > 0.25) {
-            phaseRate = 0.96 + clamp(accel / 28.0, 0.0, 0.26);
-        } else if (accel < -0.25) {
-            phaseRate = 0.64; // deceleration uses the same acceleration sample gently; no hard reverse scrub.
-        } else {
-            phaseRate = 0.82;
-        }
+        double phaseRate = 0.86 + clamp(samplePlaybackSpeedKmh / SAMPLE_VVVF_MAX_SPEED_KMH, 0.0, 1.0) * 0.22;
+        if (accel > 0.25) phaseRate += clamp(accel / 55.0, 0.0, 0.12);
+        if (accel < -0.25) phaseRate -= clamp(-accel / 80.0, 0.0, 0.10);
         sampleLoopPhase += phaseRate / loopFrames;
         sampleLoopPhase -= Math.floor(sampleLoopPhase);
+        sampleLoopPhaseB += (phaseRate * 0.997) / (loopFrames * 1.07);
+        sampleLoopPhaseB -= Math.floor(sampleLoopPhaseB);
 
-        // Two overlapping read heads create an equal-power local loop. Because the center is now
-        // smoothed, acceleration/deceleration no longer causes repeated hard seeks.
-        double p1 = sampleLoopPhase;
+        double lowerCenter = sampleCenterFromSpeed(lowerKmh, loopFrames);
+        double upperCenter = sampleCenterFromSpeed(upperKmh, loopFrames);
+        double voiceA = renderLoopBand(src, lowerCenter, loopFrames, sampleLoopPhase);
+        double voiceB = renderLoopBand(src, upperCenter, loopFrames, sampleLoopPhase);
+
+        // Equal-power crossfade between adjacent speed loops. At a 5km/h boundary, the
+        // previous upper voice becomes the new lower voice, so there is no hard seek.
+        double lowGain = Math.cos(bandFrac * Math.PI * 0.5);
+        double highGain = Math.sin(bandFrac * Math.PI * 0.5);
+        double loopLayer = voiceA * lowGain + voiceB * highGain;
+
+        // A very quiet, slower second layer breaks the obvious loop repetition without
+        // changing the character of the uploaded recording.
+        double wideLoopFrames = Math.min(usableFrames, Math.max(loopFrames + 4096, (int) (loopFrames * 1.43)));
+        double wideCenter = sampleCenterFromSpeed(samplePlaybackSpeedKmh, (int) wideLoopFrames);
+        double wideLayer = renderLoopBand(src, wideCenter, (int) wideLoopFrames, sampleLoopPhaseB);
+        double y = loopLayer * 0.86 + wideLayer * 0.18;
+
+        // Keep a smoothed visual/reference center only for diagnostics and future tuning.
+        sampleLoopCenterFrame = sampleCenterFromSpeed(samplePlaybackSpeedKmh, loopFrames);
+
+        double body = 0.006 * Math.sin(engineRumblePhase) + (random.nextDouble() - 0.5) * Math.min(0.006, speed / 16000.0);
+        engineRumblePhase = wrap(engineRumblePhase + TWO_PI * (9.0 + speed * 0.055) / SAMPLE_RATE);
+        double accelGain = accel > 0.25 ? 1.02 : (accel < -0.25 ? 0.74 : 0.86);
+        return y * accelGain * 1.16 + body;
+    }
+
+    private double sampleCenterFromSpeed(double kmh, int loopFrames) {
+        double usable = Math.max(4.0, sampleVvvfEndFrame - sampleVvvfStartFrame - 2.0);
+        double norm = clamp(kmh / SAMPLE_VVVF_MAX_SPEED_KMH, 0.0, 1.0);
+        // Preserve the original low-speed character longer, because the first few seconds
+        // usually contain the most recognisable VVVF start-up modulation.
+        double eased = norm < 0.22 ? norm * 0.86 : 0.1892 + (norm - 0.22) * 1.04;
+        eased = clamp(eased, 0.0, 1.0);
+        double center = sampleVvvfStartFrame + eased * usable;
+        double half = loopFrames * 0.5 + 64.0;
+        return clamp(center, sampleVvvfStartFrame + half, sampleVvvfEndFrame - half);
+    }
+
+    private double renderLoopBand(float[] src, double centerFrame, int loopFrames, double phase) {
+        double half = loopFrames * 0.5;
+        double p1 = phase - Math.floor(phase);
         double p2 = p1 + 0.5;
         if (p2 >= 1.0) p2 -= 1.0;
         double e1 = Math.pow(Math.sin(Math.PI * p1), 2.0);
         double e2 = Math.pow(Math.sin(Math.PI * p2), 2.0);
-        double pos1 = sampleLoopCenterFrame - half + p1 * loopFrames;
-        double pos2 = sampleLoopCenterFrame - half + p2 * loopFrames;
-        double y = (sampleAt(src, pos1) * e1 + sampleAt(src, pos2) * e2) / Math.max(0.001, e1 + e2);
-
-        // Light texture only. Keep the uploaded recording dominant.
-        double body = 0.010 * Math.sin(engineRumblePhase) + (random.nextDouble() - 0.5) * Math.min(0.010, speed / 12000.0);
-        engineRumblePhase = wrap(engineRumblePhase + TWO_PI * (10.0 + speed * 0.065) / SAMPLE_RATE);
-        double accelGain = accel > 0.25 ? 1.08 : (accel < -0.25 ? 0.72 : 0.88);
-        return y * accelGain * 1.20 + body;
+        double pos1 = centerFrame - half + p1 * loopFrames;
+        double pos2 = centerFrame - half + p2 * loopFrames;
+        return (sampleAt(src, pos1) * e1 + sampleAt(src, pos2) * e2) / Math.max(0.001, e1 + e2);
     }
 
     private double sampleAt(float[] src, double pos) {
@@ -1275,6 +1299,11 @@ public class VvvfSynthEngine {
 
     private double softClip(double x) {
         return Math.tanh(x * 1.22) / Math.tanh(1.22);
+    }
+
+    private double smoothstep(double x) {
+        x = clamp(x, 0.0, 1.0);
+        return x * x * (3.0 - 2.0 * x);
     }
 
     private double clamp(double x, double lo, double hi) {
