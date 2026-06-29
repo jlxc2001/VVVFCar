@@ -8,6 +8,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
+import android.content.SharedPreferences;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
@@ -49,7 +50,23 @@ public class MainActivity extends Activity {
     private static final int ID_NA = 1006;
     private static final int ID_ROTARY = 1007;
     private static final int ID_SUPERCHARGED_V8 = 1008;
+    private static final int ID_CUSTOM = 1009;
 
+    private static final String PREFS = "miku_vvvf_settings";
+    private static final String KEY_STYLE = "style";
+    private static final String KEY_VOLUME = "volume";
+    private static final String KEY_MUTED = "muted";
+    private static final String KEY_HOOK = "hook";
+    private static final String KEY_BACKGROUND_MUTE = "background_mute";
+    private static final String KEY_RPM_BINDING = "rpm_binding";
+    private static final String KEY_CUSTOM_CUT1 = "custom_cut1";
+    private static final String KEY_CUSTOM_CUT2 = "custom_cut2";
+    private static final String KEY_CUSTOM_MAX = "custom_max";
+    private static final String KEY_CUSTOM_ASYNC = "custom_async";
+    private static final String KEY_CUSTOM_SYNC = "custom_sync";
+    private static final String KEY_CUSTOM_WIDE = "custom_wide";
+
+    private SharedPreferences prefs;
     private HudView hudView;
     private TextView speedText;
     private TextView unitText;
@@ -58,7 +75,10 @@ public class MainActivity extends Activity {
     private SeekBar volumeSeek;
     private Switch muteSwitch;
     private Switch hookSwitch;
+    private Switch backgroundMuteSwitch;
+    private Switch rpmBindSwitch;
     private RadioButton sampleButton;
+    private RadioButton customButton;
     private RadioButton gtoButton;
     private RadioButton igbtButton;
     private RadioButton siemensButton;
@@ -69,6 +89,19 @@ public class MainActivity extends Activity {
     private RadioButton superchargedV8Button;
     private Button autoButton;
     private Dialog settingsDialog;
+    private TextView customSummaryText;
+    private TextView customCut1Label;
+    private TextView customCut2Label;
+    private TextView customMaxLabel;
+    private TextView customAsyncLabel;
+    private TextView customSyncLabel;
+    private TextView customWideLabel;
+    private SeekBar customCut1Seek;
+    private SeekBar customCut2Seek;
+    private SeekBar customMaxSeek;
+    private SeekBar customAsyncSeek;
+    private SeekBar customSyncSeek;
+    private SeekBar customWideSeek;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private boolean autoTest = false;
@@ -77,6 +110,10 @@ public class MainActivity extends Activity {
     private float displaySpeed = 0f;
     private String currentStyle = "SAMPLE_VVVF_0_140";
     private String currentSource = "HOOK";
+    private boolean currentBackgroundMute = true;
+    private boolean currentRpmBinding = false;
+    private boolean currentEffectiveMute = false;
+    private String currentCustomSummary = "0-34.5 Async 1050Hz / 34.5-38.0 Sync 9P / 38.0-160.0 Wide 3P";
 
     private final BroadcastReceiver statusReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
@@ -85,6 +122,11 @@ public class MainActivity extends Activity {
             displaySpeed = speed;
             currentStyle = intent.getStringExtra(VvvfSoundService.EXTRA_STATUS_STYLE);
             currentSource = intent.getStringExtra(VvvfSoundService.EXTRA_STATUS_SOURCE);
+            currentBackgroundMute = intent.getBooleanExtra(VvvfSoundService.EXTRA_STATUS_BACKGROUND_MUTE, currentBackgroundMute);
+            currentRpmBinding = intent.getBooleanExtra(VvvfSoundService.EXTRA_STATUS_RPM_BINDING, currentRpmBinding);
+            currentEffectiveMute = intent.getBooleanExtra(VvvfSoundService.EXTRA_STATUS_EFFECTIVE_MUTE, currentEffectiveMute);
+            String cs = intent.getStringExtra(VvvfSoundService.EXTRA_STATUS_CUSTOM_SUMMARY);
+            if (!TextUtils.isEmpty(cs)) currentCustomSummary = cs;
             updateHudSpeed(speed);
             updateInfoText();
         }
@@ -105,6 +147,10 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        currentStyle = prefs.getString(KEY_STYLE, "SAMPLE_VVVF_0_140");
+        currentBackgroundMute = prefs.getBoolean(KEY_BACKGROUND_MUTE, true);
+        currentRpmBinding = prefs.getBoolean(KEY_RPM_BINDING, false);
         maybeRequestNotificationPermission();
         setContentView(buildHudView());
         startSoundService();
@@ -116,11 +162,13 @@ public class MainActivity extends Activity {
         IntentFilter filter = new IntentFilter(VvvfSoundService.ACTION_STATUS);
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(statusReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
         else registerReceiver(statusReceiver, filter);
+        sendAppForeground(true);
     }
 
     @Override
     protected void onStop() {
         try { unregisterReceiver(statusReceiver); } catch (Throwable ignored) {}
+        sendAppForeground(false);
         super.onStop();
     }
 
@@ -270,13 +318,29 @@ public class MainActivity extends Activity {
         hookSwitch.setText("使用 MainApp Hook 车速数据源（默认开启，最低 500ms 轮询）");
         hookSwitch.setTextSize(14);
         hookSwitch.setTextColor(Color.rgb(210, 250, 250));
-        hookSwitch.setChecked(true);
+        hookSwitch.setChecked(prefs == null || prefs.getBoolean(KEY_HOOK, true));
         hookSwitch.setPadding(0, dp(12), 0, dp(4));
         root.addView(hookSwitch, matchWrap());
         hookSwitch.setOnCheckedChangeListener((buttonView, isChecked) -> sendHookEnabled(isChecked));
 
         TextView hookHint = smallHint("Hook 开启时，实车速度来自 com.ts.MainUI 的 CarInfoService；手动滑条/UDP SPEED 只作为离车调试。音频线程内部持续插值，避免 500ms 数据源导致声音一卡一卡。");
         root.addView(hookHint, matchWrap());
+
+        backgroundMuteSwitch = new Switch(this);
+        backgroundMuteSwitch.setText("软件不在前台时关闭声音（默认开启）");
+        backgroundMuteSwitch.setTextSize(14);
+        backgroundMuteSwitch.setTextColor(Color.rgb(210, 250, 250));
+        backgroundMuteSwitch.setChecked(prefs == null || prefs.getBoolean(KEY_BACKGROUND_MUTE, true));
+        root.addView(backgroundMuteSwitch, matchWrap());
+        backgroundMuteSwitch.setOnCheckedChangeListener((buttonView, isChecked) -> sendBackgroundMute(isChecked));
+
+        rpmBindSwitch = new Switch(this);
+        rpmBindSwitch.setText("根据发动机转速绑定声音，而不是车速");
+        rpmBindSwitch.setTextSize(14);
+        rpmBindSwitch.setTextColor(Color.rgb(210, 250, 250));
+        rpmBindSwitch.setChecked(prefs != null && prefs.getBoolean(KEY_RPM_BINDING, false));
+        root.addView(rpmBindSwitch, matchWrap());
+        rpmBindSwitch.setOnCheckedChangeListener((buttonView, isChecked) -> sendRpmBinding(isChecked));
 
         TextView speedLabel = label("离车调试速度");
         root.addView(speedLabel, matchWrap());
@@ -323,6 +387,7 @@ public class MainActivity extends Activity {
         styleGroup.setPadding(0, 0, 0, dp(2));
 
         sampleButton = addStyleRadio(styleGroup, ID_SAMPLE, "真实采样 VVVF 0→140km/h / 你提供的录音");
+        customButton = addStyleRadio(styleGroup, ID_CUSTOM, "自定义 VVVF / 按截图：0-34.5 Async 1050Hz，34.5-38 Sync 9P，38-160 Wide 3P");
         siemensButton = addStyleRadio(styleGroup, ID_SIEMENS, "广东地铁西门子 GTO / 广州 1 号线 A1 味");
         gtoButton = addStyleRadio(styleGroup, ID_GTO, "通用 GTO 粗糙老电车");
         igbtButton = addStyleRadio(styleGroup, ID_IGBT, "通用 IGBT 顺滑现代电车");
@@ -335,11 +400,13 @@ public class MainActivity extends Activity {
         root.addView(styleGroup, matchWrap());
         styleGroup.setOnCheckedChangeListener((group, checkedId) -> sendStyle(styleFromId(checkedId)));
 
+        addCustomVvvfControls(root);
+
         TextView volLabel = label("音量");
         root.addView(volLabel, matchWrap());
         volumeSeek = new SeekBar(this);
         volumeSeek.setMax(100);
-        volumeSeek.setProgress(55);
+        volumeSeek.setProgress(Math.round((prefs == null ? 0.55f : prefs.getFloat(KEY_VOLUME, 0.55f)) * 100f));
         root.addView(volumeSeek, matchWrap());
         volumeSeek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
@@ -353,6 +420,7 @@ public class MainActivity extends Activity {
         muteSwitch.setText("静音");
         muteSwitch.setTextSize(15);
         muteSwitch.setTextColor(Color.rgb(210, 250, 250));
+        muteSwitch.setChecked(prefs != null && prefs.getBoolean(KEY_MUTED, false));
         root.addView(muteSwitch, matchWrap());
         muteSwitch.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
             @Override public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
@@ -375,6 +443,96 @@ public class MainActivity extends Activity {
         });
 
         return scroll;
+    }
+
+    private void addCustomVvvfControls(LinearLayout root) {
+        TextView customLabel = label("自定义 VVVF 参数");
+        root.addView(customLabel, matchWrap());
+
+        customSummaryText = smallHint("当前自定义：" + currentCustomSummary);
+        root.addView(customSummaryText, matchWrap());
+
+        customCut1Label = smallHint("");
+        root.addView(customCut1Label, matchWrap());
+        customCut1Seek = new SeekBar(this);
+        customCut1Seek.setMax(1200);
+        customCut1Seek.setProgress(Math.round((prefs == null ? 34.5f : prefs.getFloat(KEY_CUSTOM_CUT1, 34.5f)) * 10f));
+        root.addView(customCut1Seek, matchWrap());
+
+        customCut2Label = smallHint("");
+        root.addView(customCut2Label, matchWrap());
+        customCut2Seek = new SeekBar(this);
+        customCut2Seek.setMax(1800);
+        customCut2Seek.setProgress(Math.round((prefs == null ? 38.0f : prefs.getFloat(KEY_CUSTOM_CUT2, 38.0f)) * 10f));
+        root.addView(customCut2Seek, matchWrap());
+
+        customMaxLabel = smallHint("");
+        root.addView(customMaxLabel, matchWrap());
+        customMaxSeek = new SeekBar(this);
+        customMaxSeek.setMax(2600);
+        customMaxSeek.setProgress(Math.round((prefs == null ? 160.0f : prefs.getFloat(KEY_CUSTOM_MAX, 160.0f)) * 10f));
+        root.addView(customMaxSeek, matchWrap());
+
+        customAsyncLabel = smallHint("");
+        root.addView(customAsyncLabel, matchWrap());
+        customAsyncSeek = new SeekBar(this);
+        customAsyncSeek.setMax(6000);
+        customAsyncSeek.setProgress(Math.round(prefs == null ? 1050f : prefs.getFloat(KEY_CUSTOM_ASYNC, 1050f)));
+        root.addView(customAsyncSeek, matchWrap());
+
+        customSyncLabel = smallHint("");
+        root.addView(customSyncLabel, matchWrap());
+        customSyncSeek = new SeekBar(this);
+        customSyncSeek.setMax(31);
+        customSyncSeek.setProgress(prefs == null ? 9 : prefs.getInt(KEY_CUSTOM_SYNC, 9));
+        root.addView(customSyncSeek, matchWrap());
+
+        customWideLabel = smallHint("");
+        root.addView(customWideLabel, matchWrap());
+        customWideSeek = new SeekBar(this);
+        customWideSeek.setMax(31);
+        customWideSeek.setProgress(prefs == null ? 3 : prefs.getInt(KEY_CUSTOM_WIDE, 3));
+        root.addView(customWideSeek, matchWrap());
+
+        SeekBar.OnSeekBarChangeListener listener = new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                updateCustomLabels();
+                if (fromUser) sendCustomVvvf();
+            }
+            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
+            @Override public void onStopTrackingTouch(SeekBar seekBar) {
+                updateCustomLabels();
+                sendCustomVvvf();
+            }
+        };
+        customCut1Seek.setOnSeekBarChangeListener(listener);
+        customCut2Seek.setOnSeekBarChangeListener(listener);
+        customMaxSeek.setOnSeekBarChangeListener(listener);
+        customAsyncSeek.setOnSeekBarChangeListener(listener);
+        customSyncSeek.setOnSeekBarChangeListener(listener);
+        customWideSeek.setOnSeekBarChangeListener(listener);
+        updateCustomLabels();
+    }
+
+    private void updateCustomLabels() {
+        if (customCut1Seek == null) return;
+        double cut1 = customCut1Seek.getProgress() / 10.0;
+        double cut2 = customCut2Seek.getProgress() / 10.0;
+        double max = customMaxSeek.getProgress() / 10.0;
+        double async = Math.max(120, customAsyncSeek.getProgress());
+        int sync = Math.max(1, customSyncSeek.getProgress());
+        int wide = Math.max(1, customWideSeek.getProgress());
+        if (customCut1Label != null) customCut1Label.setText(String.format(Locale.US, "A段结束速度：%.1f km/h", cut1));
+        if (customCut2Label != null) customCut2Label.setText(String.format(Locale.US, "9脉冲→宽3脉冲切换速度：%.1f km/h", cut2));
+        if (customMaxLabel != null) customMaxLabel.setText(String.format(Locale.US, "自定义映射最高速度：%.1f km/h", max));
+        if (customAsyncLabel != null) customAsyncLabel.setText(String.format(Locale.US, "Asynchronous 固定载波：%.0f Hz", async));
+        if (customSyncLabel != null) customSyncLabel.setText("Synchronous 脉冲数：" + sync + " Pulses");
+        if (customWideLabel != null) customWideLabel.setText("Wide 同步脉冲数：" + wide + " Pulses");
+        if (customSummaryText != null) {
+            customSummaryText.setText(String.format(Locale.US,
+                    "当前自定义：0-%.1f km/h Async %.0fHz / %.1f-%.1f km/h Sync %dP / %.1f-%.1f km/h Wide %dP",
+                    cut1, async, cut1, cut2, sync, cut2, max, wide));
+        }
     }
 
     private void updateAutoButtonText() {
@@ -403,7 +561,8 @@ public class MainActivity extends Activity {
 
     private void setCheckedStyleButton(String style) {
         String s = style == null ? "" : style.toUpperCase(Locale.US);
-        if (s.contains("SIEMENS")) siemensButton.setChecked(true);
+        if (s.contains("CUSTOM")) customButton.setChecked(true);
+        else if (s.contains("SIEMENS")) siemensButton.setChecked(true);
         else if (s.contains("IGBT")) igbtButton.setChecked(true);
         else if (s.contains("AIR")) aircraftButton.setChecked(true);
         else if (s.contains("POP")) popBangButton.setChecked(true);
@@ -416,6 +575,7 @@ public class MainActivity extends Activity {
 
     private String styleFromId(int checkedId) {
         if (checkedId == ID_SAMPLE) return "SAMPLE_VVVF_0_140";
+        if (checkedId == ID_CUSTOM) return "CUSTOM_VVVF";
         if (checkedId == ID_SIEMENS) return "SIEMENS_GZ_GTO";
         if (checkedId == ID_IGBT) return "IGBT";
         if (checkedId == ID_AIRCRAFT) return "AIRCRAFT_TURBINE";
@@ -449,17 +609,10 @@ public class MainActivity extends Activity {
         Intent i = new Intent(this, VvvfSoundService.class);
         i.setAction(VvvfSoundService.ACTION_START);
         startServiceCompat(i);
-        sendVolume(volumeSeek == null ? 0.55f : volumeSeek.getProgress() / 100f);
-        if (sampleButton == null || sampleButton.isChecked()) sendStyle("SAMPLE_VVVF_0_140");
-        else if (siemensButton != null && siemensButton.isChecked()) sendStyle("SIEMENS_GZ_GTO");
-        else if (gtoButton != null && gtoButton.isChecked()) sendStyle("GTO");
-        else if (igbtButton != null && igbtButton.isChecked()) sendStyle("IGBT");
-        else if (aircraftButton != null && aircraftButton.isChecked()) sendStyle("AIRCRAFT_TURBINE");
-        else if (popBangButton != null && popBangButton.isChecked()) sendStyle("POP_BANG_TURBO");
-        else if (naButton != null && naButton.isChecked()) sendStyle("NATURAL_ASPIRATED");
-        else if (rotaryButton != null && rotaryButton.isChecked()) sendStyle("ROTARY");
-        else if (superchargedV8Button != null && superchargedV8Button.isChecked()) sendStyle("SUPERCHARGED_V8");
+        if (volumeSeek != null) sendVolume(volumeSeek.getProgress() / 100f);
         if (hookSwitch != null) sendHookEnabled(hookSwitch.isChecked());
+        if (backgroundMuteSwitch != null) sendBackgroundMute(backgroundMuteSwitch.isChecked());
+        if (rpmBindSwitch != null) sendRpmBinding(rpmBindSwitch.isChecked());
     }
 
     private void sendSpeed(float speed) {
@@ -498,6 +651,48 @@ public class MainActivity extends Activity {
         startServiceCompat(i);
     }
 
+    private void sendAppForeground(boolean foreground) {
+        Intent i = new Intent(this, VvvfSoundService.class);
+        i.setAction(VvvfSoundService.ACTION_SET_FOREGROUND);
+        i.putExtra(VvvfSoundService.EXTRA_FOREGROUND, foreground);
+        startServiceCompat(i);
+    }
+
+    private void sendBackgroundMute(boolean enabled) {
+        currentBackgroundMute = enabled;
+        Intent i = new Intent(this, VvvfSoundService.class);
+        i.setAction(VvvfSoundService.ACTION_SET_BACKGROUND_MUTE);
+        i.putExtra(VvvfSoundService.EXTRA_BACKGROUND_MUTE, enabled);
+        startServiceCompat(i);
+    }
+
+    private void sendRpmBinding(boolean enabled) {
+        currentRpmBinding = enabled;
+        Intent i = new Intent(this, VvvfSoundService.class);
+        i.setAction(VvvfSoundService.ACTION_SET_RPM_BINDING);
+        i.putExtra(VvvfSoundService.EXTRA_RPM_BINDING, enabled);
+        startServiceCompat(i);
+    }
+
+    private void sendCustomVvvf() {
+        if (customCut1Seek == null) return;
+        double cut1 = customCut1Seek.getProgress() / 10.0;
+        double cut2 = customCut2Seek.getProgress() / 10.0;
+        double max = customMaxSeek.getProgress() / 10.0;
+        double async = customAsyncSeek.getProgress();
+        int sync = Math.max(1, customSyncSeek.getProgress());
+        int wide = Math.max(1, customWideSeek.getProgress());
+        Intent i = new Intent(this, VvvfSoundService.class);
+        i.setAction(VvvfSoundService.ACTION_SET_CUSTOM_VVVF);
+        i.putExtra(VvvfSoundService.EXTRA_CUSTOM_CUT1, cut1);
+        i.putExtra(VvvfSoundService.EXTRA_CUSTOM_CUT2, cut2);
+        i.putExtra(VvvfSoundService.EXTRA_CUSTOM_MAX_SPEED, max);
+        i.putExtra(VvvfSoundService.EXTRA_CUSTOM_ASYNC_HZ, async);
+        i.putExtra(VvvfSoundService.EXTRA_CUSTOM_SYNC_PULSES, sync);
+        i.putExtra(VvvfSoundService.EXTRA_CUSTOM_WIDE_PULSES, wide);
+        startServiceCompat(i);
+    }
+
     private void startServiceCompat(Intent i) {
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(i);
         else startService(i);
@@ -508,11 +703,19 @@ public class MainActivity extends Activity {
         String ip = getLocalIpv4();
         String host = TextUtils.isEmpty(ip) ? "车机IP" : ip;
         String text = "当前：" + (currentStyle == null ? "SAMPLE_VVVF_0_140" : currentStyle)
-                + " · " + (TextUtils.isEmpty(currentSource) ? "HOOK" : currentSource) + "\n\n"
+                + " · " + (TextUtils.isEmpty(currentSource) ? "HOOK" : currentSource)
+                + " · RPM绑定=" + (currentRpmBinding ? "ON" : "OFF")
+                + " · 后台静音=" + (currentBackgroundMute ? "ON" : "OFF")
+                + (currentEffectiveMute ? " · 当前静音" : "") + "\n"
+                + "自定义VVVF：" + currentCustomSummary + "\n\n"
                 + "局域网 UDP 指令：\n"
                 + "  echo SPEED 45 | nc -u " + host + " 47230\n"
                 + "  echo STYLE SAMPLE_VVVF_0_140 | nc -u " + host + " 47230\n"
                 + "  echo STYLE AIRCRAFT_TURBINE | nc -u " + host + " 47230\n"
+                + "  echo STYLE CUSTOM_VVVF | nc -u " + host + " 47230\n"
+                + "  echo CUSTOM 34.5 38 160 1050 9 3 | nc -u " + host + " 47230\n"
+                + "  echo RPMBIND 1 | nc -u " + host + " 47230\n"
+                + "  echo BGMUTE 1 | nc -u " + host + " 47230\n"
                 + "  echo HOOK 0 | nc -u " + host + " 47230\n"
                 + "  echo HOOK 1 | nc -u " + host + " 47230\n"
                 + "  echo POLL 500 | nc -u " + host + " 47230\n\n"
@@ -520,6 +723,9 @@ public class MainActivity extends Activity {
                 + "  adb shell am broadcast -a com.jlxc.mikuvvvf.SET_SPEED --ef speed 45\n"
                 + "  adb shell am broadcast -a com.jlxc.mikuvvvf.SET_STYLE --es style SAMPLE_VVVF_0_140\n"
                 + "  adb shell am broadcast -a com.jlxc.mikuvvvf.SET_STYLE --es style AIRCRAFT_TURBINE\n"
+                + "  adb shell am broadcast -a com.jlxc.mikuvvvf.SET_STYLE --es style CUSTOM_VVVF\n"
+                + "  adb shell am broadcast -a com.jlxc.mikuvvvf.SET_RPM_BIND --ez enabled true\n"
+                + "  adb shell am broadcast -a com.jlxc.mikuvvvf.SET_BACKGROUND_MUTE --ez enabled true\n"
                 + "  adb shell am broadcast -a com.jlxc.mikuvvvf.SET_HOOK --ez enabled false\n"
                 + "  adb shell am broadcast -a com.jlxc.mikuvvvf.SET_HOOK --ez enabled true\n"
                 + "  adb shell am broadcast -a com.jlxc.mikuvvvf.STOP\n\n"

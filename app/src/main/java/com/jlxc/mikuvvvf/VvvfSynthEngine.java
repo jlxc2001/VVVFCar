@@ -17,6 +17,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class VvvfSynthEngine {
     public enum Style {
         SAMPLE_VVVF_0_140,
+        CUSTOM_VVVF,
         GTO,
         IGBT,
         SIEMENS_GZ_GTO,
@@ -58,6 +59,19 @@ public class VvvfSynthEngine {
     private volatile float volume = 0.55f;
     private volatile Style style = Style.SAMPLE_VVVF_0_140;
     private volatile boolean muted = false;
+    private volatile boolean appInForeground = true;
+    private volatile boolean muteWhenBackground = true;
+    private volatile boolean rpmBindingEnabled = false;
+
+    // Custom VVVF preset, matching the screenshot the user provided:
+    // 0-34.5 km/h Async 1050 Hz, 34.5-38.0 km/h Sync 9 pulses,
+    // 38.0-160.0 km/h Sync Wide 3 pulses.
+    private volatile double customCut1Kmh = 34.5;
+    private volatile double customCut2Kmh = 38.0;
+    private volatile double customMaxKmh = 160.0;
+    private volatile double customAsyncCarrierHz = 1050.0;
+    private volatile int customSyncPulses = 9;
+    private volatile int customWidePulses = 3;
 
     // Optional true vehicle data. STATE speed rpm throttle can feed these.
     private volatile float externalRpm = -1f;
@@ -170,8 +184,9 @@ public class VvvfSynthEngine {
         hookInputFresh = fromHook;
         if (fromHook) hookInputNs = now;
 
-        if (!Float.isNaN(rpm) && !Float.isInfinite(rpm) && rpm > 300f) {
-            externalRpm = Math.max(600f, Math.min(9800f, rpm));
+        if (!Float.isNaN(rpm) && !Float.isInfinite(rpm) && rpm >= 0f) {
+            // Keep true 0rpm if the hook reports it; RPM-binding mode should then fade to 0 instead of estimating from speed.
+            externalRpm = Math.max(0f, Math.min(9800f, rpm));
             externalStateNs = now;
         }
         if (!Float.isNaN(throttle) && !Float.isInfinite(throttle)) {
@@ -224,6 +239,63 @@ public class VvvfSynthEngine {
         return muted;
     }
 
+    public void setAppInForeground(boolean value) {
+        appInForeground = value;
+    }
+
+    public boolean isAppInForeground() {
+        return appInForeground;
+    }
+
+    public void setMuteWhenBackground(boolean value) {
+        muteWhenBackground = value;
+    }
+
+    public boolean isMuteWhenBackground() {
+        return muteWhenBackground;
+    }
+
+    public boolean isEffectivelyMuted() {
+        return muted || (muteWhenBackground && !appInForeground);
+    }
+
+    public void setRpmBindingEnabled(boolean value) {
+        rpmBindingEnabled = value;
+    }
+
+    public boolean isRpmBindingEnabled() {
+        return rpmBindingEnabled;
+    }
+
+    public void setCustomVvvfParams(double cut1, double cut2, double maxSpeed, double asyncCarrierHz, int syncPulses, int widePulses) {
+        if (Double.isNaN(cut1) || Double.isInfinite(cut1)) cut1 = 34.5;
+        if (Double.isNaN(cut2) || Double.isInfinite(cut2)) cut2 = 38.0;
+        if (Double.isNaN(maxSpeed) || Double.isInfinite(maxSpeed)) maxSpeed = 160.0;
+        cut1 = clamp(cut1, 2.0, 120.0);
+        cut2 = clamp(cut2, cut1 + 0.5, 180.0);
+        maxSpeed = clamp(maxSpeed, cut2 + 5.0, 260.0);
+        customCut1Kmh = cut1;
+        customCut2Kmh = cut2;
+        customMaxKmh = maxSpeed;
+        customAsyncCarrierHz = clamp(asyncCarrierHz, 120.0, 6000.0);
+        customSyncPulses = (int) clamp(syncPulses, 1, 31);
+        customWidePulses = (int) clamp(widePulses, 1, 31);
+        lastRenderedStage = -100;
+    }
+
+    public double getCustomCut1Kmh() { return customCut1Kmh; }
+    public double getCustomCut2Kmh() { return customCut2Kmh; }
+    public double getCustomMaxKmh() { return customMaxKmh; }
+    public double getCustomAsyncCarrierHz() { return customAsyncCarrierHz; }
+    public int getCustomSyncPulses() { return customSyncPulses; }
+    public int getCustomWidePulses() { return customWidePulses; }
+
+    public String getCustomVvvfSummary() {
+        return String.format(Locale.US, "0-%.1f Async %.0fHz / %.1f-%.1f Sync %dP / %.1f-%.1f Wide %dP",
+                customCut1Kmh, customAsyncCarrierHz, customCut1Kmh, customCut2Kmh, customSyncPulses,
+                customCut2Kmh, customMaxKmh, customWidePulses);
+    }
+
     public void setStyle(Style value) {
         if (value != null) {
             style = value;
@@ -241,7 +313,8 @@ public class VvvfSynthEngine {
     }
 
     public String getStageName() {
-        return getStageName(targetSpeedKmh, style);
+        double stageSpeed = rpmBindingEnabled ? rpmToEquivalentSpeed(smoothedRpm) : targetSpeedKmh;
+        return getStageName(stageSpeed, style);
     }
 
     private void audioLoop() {
@@ -302,6 +375,7 @@ public class VvvfSynthEngine {
         final double rpmAlpha = 1.0 - Math.exp(-1.0 / (SAMPLE_RATE * 0.055));
         final double throttleAlpha = 1.0 - Math.exp(-1.0 / (SAMPLE_RATE * 0.090));
         Style currentStyle = style;
+        boolean effectiveMuted = isEffectivelyMuted();
 
         for (int i = 0; i < frames; i++) {
             long nowNs = System.nanoTime();
@@ -315,7 +389,12 @@ public class VvvfSynthEngine {
             smoothedSpeed += (targetSpeedKmh - smoothedSpeed) * speedAlpha;
             smoothedAccel *= hookInputFresh ? 0.9999982 : 0.999995;
 
-            double speed = smoothedSpeed;
+            double visibleSpeed = smoothedSpeed;
+            EngineState targetEngineState = calcEngineState(visibleSpeed, currentStyle);
+            smoothedRpm += (targetEngineState.rpm - smoothedRpm) * rpmAlpha;
+            smoothedThrottle += (targetEngineState.throttle - smoothedThrottle) * throttleAlpha;
+
+            double speed = rpmBindingEnabled ? rpmToEquivalentSpeed(smoothedRpm) : visibleSpeed;
             int stage = calcStage(speed, currentStyle);
             if (stage != lastRenderedStage) {
                 if (lastRenderedStage != -100) {
@@ -342,7 +421,7 @@ public class VvvfSynthEngine {
                 } else {
                     driveGain = 0.72;
                 }
-                amp = muted ? 0.0 : volume * driveGain * 1.05;
+                amp = effectiveMuted ? 0.0 : volume * driveGain * 1.05;
             } else if (isRailStyle(currentStyle)) {
                 double motorHz = calcMotorHz(speed, currentStyle);
                 double carrierHz = calcCarrierHz(speed, currentStyle, motorHz);
@@ -366,13 +445,8 @@ public class VvvfSynthEngine {
                     driveGain = 0.32 + Math.min(0.24, speed / 150.0);
                 }
                 double highSpeedDamping = speed > 92.0 ? Math.max(0.50, 1.0 - (speed - 92.0) / 190.0) : 1.0;
-                amp = muted ? 0.0 : volume * 0.40 * driveGain * highSpeedDamping;
+                amp = effectiveMuted ? 0.0 : volume * 0.40 * driveGain * highSpeedDamping;
             } else {
-                EngineState es = calcEngineState(speed, currentStyle);
-                smoothedRpm += (es.rpm - smoothedRpm) * rpmAlpha;
-                double wantedThrottle = es.throttle;
-                smoothedThrottle += (wantedThrottle - smoothedThrottle) * throttleAlpha;
-
                 advanceEnginePhases(smoothedRpm, currentStyle);
                 if (currentStyle == Style.AIRCRAFT_TURBINE) {
                     // V6 accidentally let the aircraft renderer use rail oscillator phases
@@ -392,7 +466,7 @@ public class VvvfSynthEngine {
                     loadGain = 0.42 + 0.42 * smoothedThrottle + 0.12 * clamp((smoothedRpm - 1200.0) / 6500.0, 0.0, 1.0);
                     if (smoothedAccel < -0.40) loadGain = 0.42 + Math.min(0.20, -smoothedAccel / 80.0);
                 }
-                amp = muted ? 0.0 : volume * 0.54 * clamp(loadGain, 0.15, 1.05);
+                amp = effectiveMuted ? 0.0 : volume * 0.54 * clamp(loadGain, 0.15, 1.05);
             }
 
             shiftEnvelope *= 0.99955;
@@ -661,7 +735,7 @@ public class VvvfSynthEngine {
     }
 
     private boolean isRailStyle(Style s) {
-        return s == Style.GTO || s == Style.IGBT || s == Style.SIEMENS_GZ_GTO;
+        return s == Style.GTO || s == Style.IGBT || s == Style.SIEMENS_GZ_GTO || s == Style.CUSTOM_VVVF;
     }
 
     private double renderRailWave(Style currentStyle, int stage, double speed) {
@@ -671,7 +745,9 @@ public class VvvfSynthEngine {
                 + 0.14 * Math.sin(3.0 * motorPhase)
                 + 0.07 * Math.sin(5.0 * motorPhase);
 
-        if (currentStyle == Style.SIEMENS_GZ_GTO) {
+        if (currentStyle == Style.CUSTOM_VVVF) {
+            return renderCustomVvvfWave(stage, speed, motor, gating);
+        } else if (currentStyle == Style.SIEMENS_GZ_GTO) {
             return renderGuangzhouSiemensGtoWave(stage, speed, motor, gating);
         } else if (currentStyle == Style.GTO) {
             return renderGtoWave(stage, motor, gating);
@@ -682,7 +758,9 @@ public class VvvfSynthEngine {
 
     private double addRailTransition(Style currentStyle, double speed, double wave) {
         double transition;
-        if (currentStyle == Style.SIEMENS_GZ_GTO) {
+        if (currentStyle == Style.CUSTOM_VVVF) {
+            transition = Math.max(stagePulse(speed, customCut1Kmh, 1.1), stagePulse(speed, customCut2Kmh, 1.1));
+        } else if (currentStyle == Style.SIEMENS_GZ_GTO) {
             transition = max5(stagePulse(speed, 5.5, 1.4), stagePulse(speed, 18.0, 2.3),
                     stagePulse(speed, 32.0, 2.5), stagePulse(speed, 52.0, 3.5), stagePulse(speed, 78.0, 5.0));
         } else if (currentStyle == Style.GTO) {
@@ -692,10 +770,36 @@ public class VvvfSynthEngine {
             transition = max3(stagePulse(speed, 16.0, 3.0), stagePulse(speed, 36.0, 4.0), stagePulse(speed, 78.0, 6.0));
         }
         transition = Math.max(transition, shiftEnvelope * 0.6);
-        double chirpHz = currentStyle == Style.SIEMENS_GZ_GTO ? 520.0 + speed * 31.0
-                : (currentStyle == Style.GTO ? 1100.0 + speed * 33.0 : 1800.0 + speed * 42.0);
+        double chirpHz = currentStyle == Style.CUSTOM_VVVF ? customAsyncCarrierHz + speed * 18.0
+                : (currentStyle == Style.SIEMENS_GZ_GTO ? 520.0 + speed * 31.0
+                : (currentStyle == Style.GTO ? 1100.0 + speed * 33.0 : 1800.0 + speed * 42.0));
         transitionPhase = wrap(transitionPhase + TWO_PI * chirpHz / SAMPLE_RATE);
         return wave * (1.0 - 0.18 * transition) + Math.sin(transitionPhase + motorPhase * 0.4) * 0.40 * transition;
+    }
+
+    private double renderCustomVvvfWave(int stage, double speed, double motor, double gating) {
+        double squareCarrier = Math.sin(carrierPhase) >= 0 ? 1.0 : -1.0;
+        double sineCarrier = Math.sin(carrierPhase + 1.10 * Math.sin(motorPhase));
+        double wideCarrier = Math.sin(carrierPhase) > -0.35 ? 1.0 : -1.0;
+        double pulseEdge = harshPulse(carrierPhase, 7.0);
+        double railNoise = (random.nextDouble() - 0.5) * (0.014 + Math.min(0.026, speed / 4500.0));
+        double rumble = 0.38 * Math.sin(motorPhase * 0.50) + 0.18 * Math.sin(motorPhase);
+
+        switch (stage) {
+            case 0:
+                // Asynchronous fixed-carrier section: screenshot shows 1050Hz -> 1050Hz.
+                return 0.20 * motor + 0.56 * sineCarrier * (0.35 + 0.65 * gating)
+                        + 0.18 * squareCarrier + 0.12 * rumble + railNoise;
+            case 1:
+                // Synchronous 9-pulse section. Keep it narrow and obvious during 34.5-38km/h.
+                return 0.34 * motor + 0.42 * Math.sin(carrierPhase + 2.4 * Math.sin(motorPhase)) * gating
+                        + 0.18 * pulseEdge + 0.08 * Math.sin(subCarrierPhase + motorPhase) + railNoise * 0.80;
+            default:
+                // Synchronous wide 3-pulse section. The wide carrier gives the coarse high-speed train tone.
+                return 0.38 * motor + 0.40 * wideCarrier * (0.42 + 0.58 * gating)
+                        + 0.16 * Math.sin(2.0 * carrierPhase + 0.4 * motorPhase)
+                        + 0.10 * rumble + railNoise * 0.65;
+        }
     }
 
     private double renderGuangzhouSiemensGtoWave(int stage, double speed, double motor, double gating) {
@@ -861,9 +965,15 @@ public class VvvfSynthEngine {
         return 0.78 * exhaust + 0.28 * blower + belt + tireRoad + pop + shiftCut;
     }
 
+    private double rpmToEquivalentSpeed(double rpm) {
+        // Converts engine RPM to a virtual speed axis so VVVF/sample modes can follow RPM
+        // instead of wheel speed. Idle maps to 0; 6200rpm maps near 160km/h.
+        return clamp((rpm - 700.0) / Math.max(1.0, 6200.0 - 700.0) * 160.0, 0.0, 260.0);
+    }
+
     private EngineState calcEngineState(double speed, Style currentStyle) {
         long now = System.nanoTime();
-        boolean useExternal = externalRpm > 300f && (now - externalStateNs) < 1_500_000_000L;
+        boolean useExternal = externalRpm >= 0f && (now - externalStateNs) < 1_500_000_000L;
         double throttle;
         if (externalThrottle >= 0f && (now - externalStateNs) < 1_500_000_000L) {
             throttle = externalThrottle;
@@ -875,7 +985,7 @@ public class VvvfSynthEngine {
             throttle = 0.20 + Math.min(0.20, speed / 190.0);
         }
 
-        if (currentStyle == Style.AIRCRAFT_TURBINE) {
+        if (currentStyle == Style.AIRCRAFT_TURBINE && !(rpmBindingEnabled && useExternal)) {
             double rpm = 1000.0 + clamp(speed / 160.0, 0.0, 1.0) * 5200.0 + throttle * 1200.0;
             return new EngineState(rpm, throttle);
         }
@@ -944,6 +1054,10 @@ public class VvvfSynthEngine {
                 if (speed < 90.0) return 2;
                 if (speed < 120.0) return 3;
                 return 4;
+            case CUSTOM_VVVF:
+                if (speed < customCut1Kmh) return 0;
+                if (speed < customCut2Kmh) return 1;
+                return 2;
             case SIEMENS_GZ_GTO:
                 if (speed < 5.5) return 0;
                 if (speed < 18.0) return 1;
@@ -981,6 +1095,12 @@ public class VvvfSynthEngine {
                     case 2: return "真实采样 VVVF · 中高速段";
                     case 3: return "真实采样 VVVF · 高速同步";
                     default: return "真实采样 VVVF · 120-140km/h";
+                }
+            case CUSTOM_VVVF:
+                switch (calcStage(speed, currentStyle)) {
+                    case 0: return String.format(Locale.US, "Custom VVVF · Async %.0fHz", customAsyncCarrierHz);
+                    case 1: return "Custom VVVF · Synchronous " + customSyncPulses + " Pulses";
+                    default: return "Custom VVVF · Wide " + customWidePulses + " Pulses";
                 }
             case SIEMENS_GZ_GTO:
                 switch (calcStage(speed, currentStyle)) {
@@ -1028,7 +1148,13 @@ public class VvvfSynthEngine {
 
     private double calcMotorHz(double speed, Style style) {
         double hz;
-        if (style == Style.SIEMENS_GZ_GTO) {
+        if (style == Style.CUSTOM_VVVF) {
+            // Calibrated so the 9-pulse section starts near the fixed async carrier frequency.
+            double slope = customAsyncCarrierHz / Math.max(1.0, customSyncPulses * customCut1Kmh);
+            hz = speed * slope;
+            if (speed < 0.8) hz = 4.0 + speed * slope;
+            return clamp(hz, 0.0, 620.0);
+        } else if (style == Style.SIEMENS_GZ_GTO) {
             if (speed < 5.5) hz = quantize(7.0 + speed * 1.35, 1.3);
             else if (speed < 18.0) hz = quantize(15.0 + (speed - 5.5) * 2.75, 2.7);
             else if (speed < 32.0) hz = quantize(49.0 + (speed - 18.0) * 1.95, 3.8);
@@ -1053,7 +1179,11 @@ public class VvvfSynthEngine {
     }
 
     private double calcCarrierHz(double speed, Style style, double motorHz) {
-        if (style == Style.SIEMENS_GZ_GTO) {
+        if (style == Style.CUSTOM_VVVF) {
+            if (speed < customCut1Kmh) return customAsyncCarrierHz;
+            if (speed < customCut2Kmh) return clamp(motorHz * customSyncPulses, 90.0, 7000.0);
+            return clamp(motorHz * customWidePulses, 70.0, 7000.0);
+        } else if (style == Style.SIEMENS_GZ_GTO) {
             if (speed < 5.5) return quantize(120.0 + speed * 38.0, 24.0);
             if (speed < 18.0) {
                 double[] notes = {300.0, 360.0, 430.0, 520.0, 620.0, 740.0, 880.0};
@@ -1082,7 +1212,11 @@ public class VvvfSynthEngine {
     }
 
     private double calcSubCarrierHz(double speed, Style style, double motorHz) {
-        if (style == Style.SIEMENS_GZ_GTO) {
+        if (style == Style.CUSTOM_VVVF) {
+            if (speed < customCut1Kmh) return Math.max(70.0, motorHz * 1.6);
+            if (speed < customCut2Kmh) return Math.max(70.0, motorHz * Math.max(1, customSyncPulses / 3.0));
+            return Math.max(55.0, motorHz * Math.max(1, customWidePulses));
+        } else if (style == Style.SIEMENS_GZ_GTO) {
             if (speed < 18.0) return 90.0 + speed * 8.0;
             if (speed < 52.0) return motorHz * 7.0;
             return 760.0 + speed * 5.0;

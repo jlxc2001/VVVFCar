@@ -37,6 +37,9 @@
                 <action android:name="com.jlxc.mikuvvvf.SET_SPEED" />
                 <action android:name="com.jlxc.mikuvvvf.SET_STYLE" />
                 <action android:name="com.jlxc.mikuvvvf.SET_HOOK" />
+                <action android:name="com.jlxc.mikuvvvf.SET_BACKGROUND_MUTE" />
+                <action android:name="com.jlxc.mikuvvvf.SET_RPM_BIND" />
+                <action android:name="com.jlxc.mikuvvvf.SET_CUSTOM_VVVF" />
                 <action android:name="com.jlxc.mikuvvvf.STOP" />
             </intent-filter>
         </receiver>
