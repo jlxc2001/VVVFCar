@@ -44,6 +44,16 @@ public class VvvfSynthEngine {
     private static final double SAMPLE_VVVF_MIN_LOOP_SEC = 0.58;
     private static final double SAMPLE_VVVF_MAX_LOOP_SEC = 1.08;
 
+    // V12: no-fixed-loop sample mode. Instead of playing periodic speed loops,
+    // use a non-repeating grain cloud plus a tape-follow head. This is closer to
+    // game audio engines that blend/varispeed many small grains/partials and is
+    // much less likely to expose a repeating loop when the vehicle holds speed.
+    private static final int SAMPLE_VVVF_GRAIN_COUNT = 10;
+    private static final double SAMPLE_VVVF_MIN_GRAIN_SEC = 0.105;
+    private static final double SAMPLE_VVVF_MAX_GRAIN_SEC = 0.255;
+    private static final double SAMPLE_VVVF_STILL_SPREAD_SEC = 0.46;
+    private static final double SAMPLE_VVVF_MOVING_SPREAD_SEC = 0.13;
+
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final Random random = new Random(20260620L);
 
@@ -56,6 +66,13 @@ public class VvvfSynthEngine {
     private double sampleLoopPhaseB = 0.37;
     private double sampleLoopCenterFrame = -1.0;
     private double samplePlaybackSpeedKmh = -1.0;
+
+    private final SampleGrain[] sampleGrains = new SampleGrain[SAMPLE_VVVF_GRAIN_COUNT];
+    private boolean sampleGrainsPrimed = false;
+    private double sampleTargetFrameSmoothed = -1.0;
+    private double sampleTapeFrame = -1.0;
+    private double sampleTapeRate = 0.0;
+    private double sampleTexturePhase = 0.0;
 
     private Thread audioThread;
     private AudioTrack audioTrack;
@@ -313,6 +330,11 @@ public class VvvfSynthEngine {
             sampleLoopPhaseB = 0.37;
             sampleLoopCenterFrame = -1.0;
             samplePlaybackSpeedKmh = -1.0;
+            sampleGrainsPrimed = false;
+            sampleTargetFrameSmoothed = -1.0;
+            sampleTapeFrame = -1.0;
+            sampleTapeRate = 0.0;
+            sampleTexturePhase = 0.0;
         }
     }
 
@@ -579,65 +601,125 @@ public class VvvfSynthEngine {
                     Math.sin(motorPhase), 0.50 + 0.50 * Math.abs(Math.sin(motorPhase)));
         }
 
-        // Game-style sampled engine logic:
-        //   speed -> two neighbouring speed-loop bands -> equal-power crossfade.
-        // This is much closer to how games build smooth engine sound from a small set of
-        // RPM loops. The old single moving grain window could sound strange because it
-        // constantly moved the loop centre while the vehicle was accelerating.
-        if (samplePlaybackSpeedKmh < 0.0) samplePlaybackSpeedKmh = speed;
-        double followTau = accel > 0.25 ? 0.20 : (accel < -0.25 ? 0.34 : 0.52);
-        double followAlpha = 1.0 - Math.exp(-1.0 / (SAMPLE_RATE * followTau));
-        samplePlaybackSpeedKmh += (speed - samplePlaybackSpeedKmh) * followAlpha;
-        samplePlaybackSpeedKmh = clamp(samplePlaybackSpeedKmh, 0.0, SAMPLE_VVVF_MAX_SPEED_KMH);
+        // V12 no-fixed-loop sample logic:
+        // 1) speed -> target frame inside the uploaded 0-140km/h recording.
+        // 2) a continuous tape head follows that target during acceleration/deceleration.
+        // 3) a random-overlap grain cloud sustains the current speed when the car is steady.
+        // There is no single repeating loop length anymore, so the obvious loop sound in V11
+        // should be much weaker.
+        double targetFrame = sampleFrameFromSpeed(speed);
+        if (sampleTargetFrameSmoothed < 0.0) sampleTargetFrameSmoothed = targetFrame;
+        double targetTau = Math.abs(accel) > 0.35 ? 0.22 : 0.58;
+        double targetAlpha = 1.0 - Math.exp(-1.0 / (SAMPLE_RATE * targetTau));
+        sampleTargetFrameSmoothed += (targetFrame - sampleTargetFrameSmoothed) * targetAlpha;
 
-        double bandKmh = SAMPLE_VVVF_BAND_KMH;
-        double bandIndex = Math.floor(samplePlaybackSpeedKmh / bandKmh);
-        double lowerKmh = clamp(bandIndex * bandKmh, 0.0, SAMPLE_VVVF_MAX_SPEED_KMH);
-        double upperKmh = clamp(lowerKmh + bandKmh, 0.0, SAMPLE_VVVF_MAX_SPEED_KMH);
-        double bandFrac = upperKmh > lowerKmh ? (samplePlaybackSpeedKmh - lowerKmh) / (upperKmh - lowerKmh) : 0.0;
-        bandFrac = smoothstep(clamp(bandFrac, 0.0, 1.0));
+        if (sampleTapeFrame < 0.0) sampleTapeFrame = sampleTargetFrameSmoothed;
+        double errorFrames = sampleTargetFrameSmoothed - sampleTapeFrame;
+        double desiredRate = clamp(errorFrames / (SAMPLE_RATE * 0.38), -0.72, 0.72);
+        // A little real source drift while accelerating keeps stage transitions continuous.
+        double framesPerKmh = (sampleVvvfEndFrame - sampleVvvfStartFrame) / SAMPLE_VVVF_MAX_SPEED_KMH;
+        desiredRate += clamp(accel * framesPerKmh / SAMPLE_RATE, -0.18, 0.18);
+        sampleTapeRate += (desiredRate - sampleTapeRate) * 0.00042;
+        sampleTapeFrame += sampleTapeRate;
+        sampleTapeFrame = clamp(sampleTapeFrame, sampleVvvfStartFrame + 8.0, sampleVvvfEndFrame - 16.0);
+        double tape = sampleAt(src, sampleTapeFrame);
 
-        double loopSec = SAMPLE_VVVF_MAX_LOOP_SEC
-                - (SAMPLE_VVVF_MAX_LOOP_SEC - SAMPLE_VVVF_MIN_LOOP_SEC)
-                * clamp(samplePlaybackSpeedKmh / SAMPLE_VVVF_MAX_SPEED_KMH, 0.0, 1.0);
-        if (Math.abs(accel) > 0.35) loopSec *= 0.92;
-        int loopFrames = (int) (loopSec * sampleVvvfRate);
-        int usableFrames = Math.max(8192, sampleVvvfEndFrame - sampleVvvfStartFrame - 256);
-        loopFrames = Math.max(8192, Math.min(loopFrames, usableFrames));
+        double motion = smoothstep(clamp((Math.abs(accel) - 0.10) / 1.15, 0.0, 1.0));
+        if (!sampleGrainsPrimed) {
+            primeSampleGrains(sampleTargetFrameSmoothed, motion);
+        }
+        double grains = renderGranularSampleCloud(src, sampleTargetFrameSmoothed, speed, accel, motion);
 
-        double phaseRate = 0.86 + clamp(samplePlaybackSpeedKmh / SAMPLE_VVVF_MAX_SPEED_KMH, 0.0, 1.0) * 0.22;
-        if (accel > 0.25) phaseRate += clamp(accel / 55.0, 0.0, 0.12);
-        if (accel < -0.25) phaseRate -= clamp(-accel / 80.0, 0.0, 0.10);
-        sampleLoopPhase += phaseRate / loopFrames;
-        sampleLoopPhase -= Math.floor(sampleLoopPhase);
-        sampleLoopPhaseB += (phaseRate * 0.997) / (loopFrames * 1.07);
-        sampleLoopPhaseB -= Math.floor(sampleLoopPhaseB);
+        // During strong acceleration/deceleration use more continuous tape, during steady speed
+        // use more random grains. Equal-ish blend avoids hard switching.
+        double y = grains * (0.92 - 0.22 * motion) + tape * (0.18 + 0.46 * motion);
 
-        double lowerCenter = sampleCenterFromSpeed(lowerKmh, loopFrames);
-        double upperCenter = sampleCenterFromSpeed(upperKmh, loopFrames);
-        double voiceA = renderLoopBand(src, lowerCenter, loopFrames, sampleLoopPhase);
-        double voiceB = renderLoopBand(src, upperCenter, loopFrames, sampleLoopPhase);
+        // Very quiet non-periodic texture avoids dead silence between grains and masks micro joins.
+        sampleTexturePhase = wrap(sampleTexturePhase + TWO_PI * (7.0 + speed * 0.042) / SAMPLE_RATE);
+        double body = 0.0045 * Math.sin(sampleTexturePhase)
+                + (random.nextDouble() - 0.5) * Math.min(0.0075, 0.002 + speed / 26000.0);
 
-        // Equal-power crossfade between adjacent speed loops. At a 5km/h boundary, the
-        // previous upper voice becomes the new lower voice, so there is no hard seek.
-        double lowGain = Math.cos(bandFrac * Math.PI * 0.5);
-        double highGain = Math.sin(bandFrac * Math.PI * 0.5);
-        double loopLayer = voiceA * lowGain + voiceB * highGain;
+        sampleLoopCenterFrame = sampleTargetFrameSmoothed;
+        samplePlaybackSpeedKmh = speed;
+        double accelGain = accel > 0.25 ? 1.00 : (accel < -0.25 ? 0.70 : 0.82);
+        return y * accelGain * 1.10 + body;
+    }
 
-        // A very quiet, slower second layer breaks the obvious loop repetition without
-        // changing the character of the uploaded recording.
-        double wideLoopFrames = Math.min(usableFrames, Math.max(loopFrames + 4096, (int) (loopFrames * 1.43)));
-        double wideCenter = sampleCenterFromSpeed(samplePlaybackSpeedKmh, (int) wideLoopFrames);
-        double wideLayer = renderLoopBand(src, wideCenter, (int) wideLoopFrames, sampleLoopPhaseB);
-        double y = loopLayer * 0.86 + wideLayer * 0.18;
 
-        // Keep a smoothed visual/reference center only for diagnostics and future tuning.
-        sampleLoopCenterFrame = sampleCenterFromSpeed(samplePlaybackSpeedKmh, loopFrames);
+    private double sampleFrameFromSpeed(double kmh) {
+        double usable = Math.max(4.0, sampleVvvfEndFrame - sampleVvvfStartFrame - 2.0);
+        double norm = clamp(kmh / SAMPLE_VVVF_MAX_SPEED_KMH, 0.0, 1.0);
+        // Same low-speed bias as older versions: keep the characteristic start-up section
+        // from being compressed too much.
+        double eased = norm < 0.22 ? norm * 0.86 : 0.1892 + (norm - 0.22) * 1.04;
+        eased = clamp(eased, 0.0, 1.0);
+        return clamp(sampleVvvfStartFrame + eased * usable, sampleVvvfStartFrame + 16.0, sampleVvvfEndFrame - 32.0);
+    }
 
-        double body = 0.006 * Math.sin(engineRumblePhase) + (random.nextDouble() - 0.5) * Math.min(0.006, speed / 16000.0);
-        engineRumblePhase = wrap(engineRumblePhase + TWO_PI * (9.0 + speed * 0.055) / SAMPLE_RATE);
-        double accelGain = accel > 0.25 ? 1.02 : (accel < -0.25 ? 0.74 : 0.86);
-        return y * accelGain * 1.16 + body;
+    private void primeSampleGrains(double centerFrame, double motion) {
+        for (int i = 0; i < sampleGrains.length; i++) {
+            if (sampleGrains[i] == null) sampleGrains[i] = new SampleGrain();
+            spawnSampleGrain(sampleGrains[i], centerFrame, 0.0, motion, i / (double) sampleGrains.length);
+        }
+        sampleGrainsPrimed = true;
+    }
+
+    private double renderGranularSampleCloud(float[] src, double centerFrame, double speed, double accel, double motion) {
+        double sum = 0.0;
+        double weight = 0.0;
+        for (int i = 0; i < sampleGrains.length; i++) {
+            SampleGrain g = sampleGrains[i];
+            if (g == null) {
+                g = new SampleGrain();
+                sampleGrains[i] = g;
+                spawnSampleGrain(g, centerFrame, accel, motion, i / (double) sampleGrains.length);
+            }
+            if (g.age >= g.length || g.length <= 8) {
+                spawnSampleGrain(g, centerFrame, accel, motion, random.nextDouble());
+            }
+
+            double t = g.age / Math.max(1.0, g.length);
+            double win = Math.sin(Math.PI * clamp(t, 0.0, 1.0));
+            win = win * win;
+            double value = sampleAt(src, g.pos);
+            sum += value * win * g.gain;
+            weight += win * g.gain;
+
+            g.pos += g.rate;
+            g.age += 1.0;
+            if (g.pos < sampleVvvfStartFrame + 4.0 || g.pos >= sampleVvvfEndFrame - 8.0) {
+                g.age = g.length + 1.0;
+            }
+        }
+        double cloud = weight > 0.0001 ? sum / weight : sampleAt(src, centerFrame);
+
+        // Tiny speed-dependent comb-free layer. It is not a loop; it is only a noise-like
+        // body component to make steady speed sound less like repeated sample grains.
+        double air = (random.nextDouble() - 0.5) * (0.0015 + clamp(speed / 140.0, 0.0, 1.0) * 0.0030);
+        return cloud + air;
+    }
+
+    private void spawnSampleGrain(SampleGrain g, double centerFrame, double accel, double motion, double phaseOffset) {
+        double grainSec = SAMPLE_VVVF_MAX_GRAIN_SEC
+                - (SAMPLE_VVVF_MAX_GRAIN_SEC - SAMPLE_VVVF_MIN_GRAIN_SEC) * motion;
+        grainSec *= 0.78 + random.nextDouble() * 0.44;
+        int length = (int) clamp(grainSec * sampleVvvfRate, 4096.0, 16384.0);
+
+        double spreadSec = SAMPLE_VVVF_STILL_SPREAD_SEC
+                - (SAMPLE_VVVF_STILL_SPREAD_SEC - SAMPLE_VVVF_MOVING_SPREAD_SEC) * motion;
+        double spreadFrames = spreadSec * sampleVvvfRate;
+        // Randomized offsets remove the periodic loop impression. A small acceleration bias
+        // makes new grains appear slightly ahead/behind the target while moving.
+        double randomOffset = (random.nextDouble() * 2.0 - 1.0) * spreadFrames;
+        double accelOffset = clamp(accel / 20.0, -1.0, 1.0) * spreadFrames * 0.32;
+        double start = centerFrame + randomOffset + accelOffset - length * phaseOffset;
+        start = clamp(start, sampleVvvfStartFrame + 8.0, sampleVvvfEndFrame - length - 16.0);
+
+        g.pos = start;
+        g.age = clamp(length * phaseOffset, 0.0, Math.max(1, length - 1));
+        g.length = length;
+        g.rate = 0.965 + random.nextDouble() * 0.075 + clamp(accel / 180.0, -0.035, 0.035);
+        g.gain = 0.72 + random.nextDouble() * 0.34;
     }
 
     private double sampleCenterFromSpeed(double kmh, int loopFrames) {
@@ -1321,6 +1403,14 @@ public class VvvfSynthEngine {
         if (listener != null) {
             try { listener.onStatus(text); } catch (Throwable ignored) {}
         }
+    }
+
+    private static class SampleGrain {
+        double pos;
+        double age;
+        double length;
+        double rate;
+        double gain;
     }
 
     private static class EngineState {
